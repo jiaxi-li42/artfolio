@@ -224,7 +224,7 @@ def extract_metadata(site, soup, url):
                     profiles.append({"role": "author" if editorial else "artist", "name": name, "bio": value, "links": links(node, url) + artist_links})
                     names.append(name)
                     exclusions.append(index)
-                elif re.match(r"^(?:Notes|References|Bibliography)\b", value):
+                elif re.match(r"^(?:Notes|References|Bibliography)\b", value, re.I):
                     for label, section in reference_sections(node, url).items():
                         add(label, section["text"], selector=selector, extra_links=section["links"])
                     exclusions.append(index)

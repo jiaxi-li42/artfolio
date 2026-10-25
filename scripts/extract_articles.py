@@ -7,6 +7,8 @@ import json
 import re
 import socket
 import ipaddress
+import random
+import math
 import time
 import threading
 import urllib.error
@@ -20,7 +22,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode, qu
 
 from bs4 import BeautifulSoup
 from PIL import Image
-from source_metadata import extract_metadata
+from source_metadata import extract_metadata, extract_reading_body
+from content_store import ContentIssue, RetryableFetchError, atomic_write, save
 
 OUT = Path(__file__).resolve().parent.parent / "data" / "sources"
 AGENT = "Artfolio/0.1 (public article acquisition)"
@@ -33,6 +36,27 @@ FEEDS = {
 }
 POLICIES = {}
 POLICY_LOCK = threading.Lock()
+DEADLINE = float('inf')
+
+
+def check_deadline():
+    if time.monotonic() >= DEADLINE:
+        raise RetryableFetchError('Run time budget reached; resume on the next run')
+
+
+def inspect_image(raw):
+    with Image.open(io.BytesIO(raw)) as photo:
+        fmt, size = photo.format, photo.size
+        if size[0] * size[1] > 40_000_000:
+            raise ContentIssue('Image exceeds the 40 megapixel processing limit')
+        if photo.getexif().get(274) in {5, 6, 7, 8}:
+            size = size[::-1]
+        frames = getattr(photo, 'n_frames', 1)
+        photo.load()
+    # PNG EXIF may load the image, so verify a freshly opened stream.
+    with Image.open(io.BytesIO(raw)) as photo:
+        photo.verify()
+    return fmt, size, frames
 
 
 def canonical(url):
@@ -51,23 +75,62 @@ def check_target(url):
 
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, robots=False):
+        self.robots = robots
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         check_target(newurl)
+        if self.robots:
+            allowed(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def read_url(url, limit=5_000_000):
+def read_url(url, limit=5_000_000, headers=None, robots=False):
     p = urlsplit(url)
     url = urlunsplit((p.scheme, p.netloc, quote(p.path, safe="/%:@+,-._~"),
                      quote(p.query, safe="=&%:+,/?@-._~"), ""))
-    check_target(url)
-    req = urllib.request.Request(url, headers={"User-Agent": AGENT, "Accept-Encoding": "identity"})
-    with urllib.request.build_opener(SafeRedirect).open(req, timeout=25) as r:
-        raw = r.read(limit + 1)
-        if len(raw) > limit:
-            raise ValueError(f"Resource exceeds validation bound {limit}; not silently omitted")
-        return raw, {"url": url, "final_url": r.url, "status": r.status,
-                     "content_type": r.headers.get("Content-Type", ""), "bytes": len(raw)}
+    try:
+        check_target(url)
+    except OSError as error:
+        raise RetryableFetchError('Target DNS resolution failed') from error
+    req = urllib.request.Request(url, headers={"User-Agent": AGENT, "Accept-Encoding": "identity", **(headers or {})})
+    for attempt in range(3):
+        check_deadline()
+        try:
+            with urllib.request.build_opener(SafeRedirect(robots)).open(req, timeout=25) as r:
+                raw = r.read(limit + 1)
+                if len(raw) > limit:
+                    raise ContentIssue(f"Resource exceeds validation bound {limit}")
+                return raw, {"url": url, "final_url": r.url, "status": r.status,
+                    "content_type": r.headers.get("Content-Type", ""), "bytes": len(raw),
+                    "etag": r.headers.get("ETag"), "last_modified": r.headers.get("Last-Modified")}
+        except urllib.error.HTTPError as error:
+            if error.code == 304 and headers:
+                error.close()
+                return b"", {"status": 304, "final_url": error.url}
+            if error.code not in {408, 429} and error.code < 500:
+                error.close()
+                raise
+            retry_after = error.headers.get("Retry-After", "")
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                try:
+                    delay = (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds()
+                except (ValueError, TypeError, OverflowError):
+                    delay = 2 ** attempt
+            if not math.isfinite(delay):
+                delay = 2 ** attempt
+            if delay > 60:
+                error.close()
+                raise RetryableFetchError('Server requested a longer Retry-After; deferred to next run', retry_after=delay) from error
+            failure = error
+            error.close()
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            failure, delay = error, 2 ** attempt
+        if attempt == 2:
+            raise RetryableFetchError(str(failure)) from failure
+        time.sleep(max(0, delay) + random.uniform(0, 0.5))
 
 
 def allowed(url):
@@ -95,17 +158,20 @@ def allowed(url):
         raise ValueError("robots disallows this target; no bypass attempted")
 
 
-def public_read(url, limit=5_000_000):
+def public_read(url, limit=5_000_000, headers=None):
     allowed(url)
-    raw, meta = read_url(url, limit)
+    raw, meta = read_url(url, limit, headers=headers, robots=True)
     # Fixed source targets only; check the returned CDN origin before retaining its data.
     allowed(meta["final_url"])
     return raw, meta
 
 
 def feed_items(raw):
-    root = ET.fromstring(raw.decode("utf-8-sig").lstrip())
-    result = []
+    try:
+        root = ET.fromstring(raw.decode("utf-8-sig").lstrip())
+    except (ET.ParseError, UnicodeError) as error:
+        raise ContentIssue('Feed is not valid RSS/Atom XML') from error
+    result, invalid = [], 0
     for item in root.iter():
         if item.tag.split("}")[-1] not in {"item", "entry"}:
             continue
@@ -125,11 +191,28 @@ def feed_items(raw):
             continue
         stamp = parts.get("published") or parts.get("pubDate") or parts.get("updated", "")
         try:
-            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        except ValueError:
-            when = parsedate_to_datetime(stamp) if stamp else datetime.min.replace(tzinfo=timezone.utc)
-        parts.update(url=canonical(link), published_at=when.isoformat(), sort_at=when.timestamp())
-        result.append(parts)
+            try:
+                when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                when = parsedate_to_datetime(stamp)
+            if when.tzinfo is None:
+                raise ValueError('Feed date has no timezone')
+            when = when.astimezone(timezone.utc)
+            target = urlsplit(link)
+            if target.scheme != 'https' or not target.hostname or target.username or target.password:
+                raise ValueError('Invalid feed article URL')
+        except (ValueError, TypeError, OverflowError):
+            invalid += 1
+            continue
+        # Full RSS HTML stays in the private feed file, not in the growing job ledger.
+        entry = {key: parts[key] for key in ['title', 'terms', 'creator', 'feed_author', 'guid', 'id'] if key in parts}
+        entry.update(url=canonical(link), published_at=when.isoformat(), sort_at=when.timestamp())
+        result.append(entry)
+    if invalid:
+        # Never turn an unparseable feed item into a silent "no new articles" result.
+        raise ContentIssue(f'Feed has {invalid} invalid URL/date entries')
+    if not result:
+        raise ContentIssue('Feed contains no dated public article entries')
     return sorted(result, key=lambda x: x["sort_at"], reverse=True)
 
 
@@ -246,7 +329,7 @@ def extract(name):
     }
     body = soup.select_one(selectors[name])
     if body is None:
-        raise ValueError("Article body selector no longer matches")
+        raise ContentIssue("Article body selector no longer matches")
     title = text(soup.select_one("h1")) or selected["title"]
     if name == "teeth":
         image_nodes = body.find_all("img")
@@ -284,8 +367,13 @@ def extract(name):
     paragraphs = [text(e) for e in clean.select("p,h1,h2,h3,h4,li,figcaption")
                   if text(e) and not e.select("p,h1,h2,h3,h4,li,figcaption")]
     body_text = "\n\n".join(paragraphs)
-    if not body_text:
-        raise ValueError("Empty article text")
+    cleaned = extract_reading_body(name, soup, metadata, {r['caption'] for r in images if r.get('caption')})
+    if not title.strip() or not images or len(images) > 100:
+        raise ContentIssue('Missing title/images or unexpected gallery size')
+    if name in {'aperture', 'itsnicethat', 'c41'} and sum(map(len, cleaned)) < 80:
+        raise ContentIssue('Expected editorial body is missing or unexpectedly short')
+    if re.search(r'^(?:just a moment|access denied|verify you are human|sign in to continue)$', title, re.I):
+        raise ContentIssue('Challenge or login page returned instead of article')
     meta = {e.get("property") or e.get("name"): e.get("content") for e in soup.find_all("meta")}
     taxonomies = []
     for item in feed_items((folder / "feed-0.xml").read_bytes()):
@@ -317,8 +405,9 @@ def extract(name):
             "feed_creator_raw": selected.get("creator") or selected.get("feed_author"),
             "missing_fields": [k for k,v in [("authors",authors),("credits",credits)] if not v],
             "captured_at": datetime.now(timezone.utc).isoformat()}
-    (folder / "article.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    (folder / "body.txt").write_text(body_text, encoding="utf-8")
+    data['quality'] = {'type': 'editorial' if cleaned else 'gallery', 'cleaned_paragraphs': len(cleaned)}
+    save(folder / 'article.json', data)
+    atomic_write(folder / 'body.txt', body_text.encode('utf-8'))
     return {"site": name, "title": title, "authors": authors, "images": len(images), "credits": len(credits), "text_characters": len(body_text), "missing_fields": data["missing_fields"]}
 
 
@@ -329,34 +418,43 @@ def download(name):
     start = time.monotonic()
     for rec in data["images"]:
         try:
+            check_deadline()
             existing = folder / rec.get("local_file", "__not_downloaded__")
             if rec.get("sha256") and existing.is_file() and hashlib.sha256(existing.read_bytes()).hexdigest() == rec["sha256"]:
                 rec["verification"] = "verified cached file"
+                rec.pop('error', None)
+                rec.pop('retryable', None)
+                rec.pop('retry_after', None)
                 continue
             time.sleep(1)
             raw, response = public_read(rec["url"], 25_000_000)
             if not response["content_type"].lower().startswith("image/"):
                 raise ValueError("Response MIME is not an image")
-            with Image.open(io.BytesIO(raw)) as photo:
-                fmt, size = photo.format, photo.size
-                frames = getattr(photo, "n_frames", 1)
-                photo.verify()
+            fmt, size, frames = inspect_image(raw)
             suffix = {"JPEG":"jpg","PNG":"png","WEBP":"webp","GIF":"gif","AVIF":"avif"}.get(fmt)
             if not suffix:
                 raise ValueError(f"Format {fmt} needs additional validation; no silent omission")
             filename = f"images/{rec['position']:03d}.{suffix}"
-            (folder / filename).write_bytes(raw)
+            atomic_write(folder / filename, raw)
             rec.update(local_file=filename, sha256=hashlib.sha256(raw).hexdigest(),
                        width=size[0], height=size[1], frames=frames, response=response, verification="downloaded and decoded")
+            if sum(r.get('response', {}).get('bytes', 0) for r in data['images']) > 250_000_000:
+                raise ContentIssue('Article exceeds the 250 MB processing limit')
             rec.pop("error", None)
+            rec.pop('retryable', None)
+            rec.pop('retry_after', None)
         except Exception as e:
             rec["error"] = str(e)
+            rec['retryable'] = isinstance(e, RetryableFetchError)
+            rec['retry_after'] = getattr(e, 'retry_after', 0)
             rec["verification"] = "failed; retained for retry"
-        (folder / "article.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save(folder / 'article.json', data)
+        if time.monotonic() >= DEADLINE:
+            break
     result = {"site": name, "expected": len(data["images"]), "downloaded": sum(bool(r.get("local_file")) and not r.get("error") for r in data["images"]),
               "bytes": sum(r.get("response", {}).get("bytes", 0) for r in data["images"]),
               "seconds": round(time.monotonic()-start, 2), "failures": [{"position":r["position"],"error":r["error"]} for r in data["images"] if r.get("error")]}
-    (folder / "download-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    save(folder / 'download-result.json', result)
     return result
 
 

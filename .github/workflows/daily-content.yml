@@ -1,0 +1,84 @@
+name: Daily content
+
+on:
+  schedule:
+    - cron: '17 8,14,20 * * *'
+      timezone: Europe/London
+  workflow_dispatch:
+    inputs:
+      through:
+        description: 'Batch date through YYYY-MM-DD (empty = today in London)'
+        type: string
+      mode:
+        description: Operation
+        type: choice
+        default: collect
+        options: [collect, retry, publish-only, audit, rollback]
+      release:
+        description: 'Release hash (rollback only)'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artfolio-content
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.event_name == 'workflow_dispatch' || vars.ARTFOLIO_PIPELINE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ARTFOLIO_STATE_BUCKET: ${{ vars.ARTFOLIO_STATE_BUCKET }}
+      ARTFOLIO_PUBLIC_BUCKET: ${{ vars.ARTFOLIO_PUBLIC_BUCKET }}
+      ARTFOLIO_CONTENT_BASE_URL: ${{ vars.ARTFOLIO_CONTENT_BASE_URL }}
+      ARTFOLIO_S3_ENDPOINT: ${{ vars.ARTFOLIO_S3_ENDPOINT }}
+      ARTFOLIO_S3_REGION: ${{ vars.ARTFOLIO_S3_REGION || 'auto' }}
+      ARTFOLIO_S3_PREFIX: ${{ vars.ARTFOLIO_S3_PREFIX || 'artfolio' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.ARTFOLIO_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.ARTFOLIO_SECRET_ACCESS_KEY }}
+      ARTFOLIO_ALERT_WEBHOOK: ${{ secrets.ARTFOLIO_ALERT_WEBHOOK }}
+      ARTFOLIO_HEARTBEAT_URL: ${{ secrets.ARTFOLIO_HEARTBEAT_URL }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Acquire and publish validated content
+        env:
+          INPUT_THROUGH: ${{ inputs.through }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_RELEASE: ${{ inputs.release }}
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$INPUT_THROUGH" ]]; then args+=(--through "$INPUT_THROUGH"); fi
+          case "$INPUT_MODE" in
+            retry) args+=(--retry-quarantined) ;;
+            publish-only) args+=(--publish-only) ;;
+            audit) args+=(--audit) ;;
+            rollback) args+=(--rollback "$INPUT_RELEASE") ;;
+          esac
+          set +e
+          python scripts/run_daily.py "${args[@]}"
+          result=$?
+          if [[ "$result" == 2 ]]; then
+            echo '::warning::Some sources need attention; see the run summary. Successful sources were published.'
+            exit 0
+          fi
+          exit "$result"
+      - name: Keep the run report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: content-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: data/last-run.json
+          if-no-files-found: ignore
+          retention-days: 14
