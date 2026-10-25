@@ -45,9 +45,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid #171717; outline-offs
 .reading-area { flex: 1 1 auto; min-width: 0; padding: 8px; }
 .reader-loading { width: 100%; border-radius: 8px; background: #f5f5f5; }
 .page-status { max-width: 720px; margin: 0 auto; padding: 8px; }
-.page-status > p { padding: 16px; color: #808080; }
-.page-placeholder { min-height: 55svh; background: #f5f5f5; border-radius: 8px; }
-.route-pending { position: fixed; inset: 0; display: grid; place-items: center; background: #fff; color: #808080; pointer-events: none; }
 .empty-state { padding: 24px; border-radius: 8px; background: #f5f5f5; line-height: 1.5; }
 .empty-state button { padding: 8px 12px; margin-top: 12px; background: #e5e5e5; border-radius: 30px; cursor: pointer; }
 .mobile-empty { display: none; }

@@ -82,6 +82,6 @@ export default function ArchiveTransition({ children }: { children: React.ReactN
 
   return <ArchiveNavigation value={navigate}>
     <div ref={root} data-archive-phase={phase} aria-busy={phase !== "idle"} inert={phase !== "idle"}>{children}</div>
-    {phase === "waiting" && <div className="route-pending" role="status">Loading articles…</div>}
+    {phase === "waiting" && <span className="sr-only" role="status">Loading articles…</span>}
   </ArchiveNavigation>;
 }

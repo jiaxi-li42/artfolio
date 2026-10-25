@@ -120,6 +120,9 @@ def read_url(url, limit=5_000_000, headers=None, robots=False):
             if error.code == 304 and headers:
                 error.close()
                 return b"", {"status": 304, "final_url": error.url}
+            if error.code in {301, 302, 303, 307, 308}:
+                error.close()
+                raise ContentIssue('Source redirect chain did not resolve') from error
             if error.code not in {408, 429} and error.code < 500:
                 error.close()
                 raise
