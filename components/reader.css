@@ -1,0 +1,195 @@
+.article-reader {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reader-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.reader-figure {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.reader-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.reader-image-open { display: block; width: 100%; padding: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.reader-image-open:focus-visible { outline-offset: -3px; }
+.reader-caption { margin-top: 8px; width: 100%; padding: 16px; border-radius: 8px; background: rgba(0, 0, 0, .04); color: rgba(0, 0, 0, .5); white-space: pre-line; overflow-wrap: anywhere; }
+
+.reader-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  overflow-anchor: none;
+}
+
+.reader-grid > .reader-figure:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+.reader-footer {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.reader-card {
+  min-width: 0;
+  padding: 16px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.04);
+  overflow-wrap: anywhere;
+  transition: background-color .5s;
+}
+
+.reader-card h2 {
+  margin: 0 0 8px;
+  color: rgba(0, 0, 0, 0.5);
+  font: inherit;
+}
+
+.reader-about-text { padding-right: 10%; }
+
+.reader-about p {
+  margin: 0 0 12px;
+  font: inherit;
+}
+
+.reader-about p:last-child {
+  margin-bottom: 0;
+}
+
+.reader-metadata {
+  grid-column: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reader-metadata:only-child { grid-column: 1 / -1; }
+
+.reader-credits dl,
+.reader-credits dd {
+  margin: 0;
+}
+
+.reader-credits dl { line-height: 1.4; }
+
+.reader-credits dl > div {
+  margin-top: 32px;
+}
+
+.reader-credits dl > div:first-child { margin-top: 8px; }
+
+.reader-credits dt {
+  color: rgba(0, 0, 0, 0.5);
+  line-height: 1.25;
+  margin-bottom: 8px;
+}
+
+.reader-credits dd > span,
+.credit-role > span {
+  display: block;
+  white-space: pre-line;
+}
+
+.credit-role + .credit-role { margin-top: 12px; }
+.credit-role-label { color: #000; }
+
+.reader-card a {
+  color: rgba(0, 0, 0, 0.5);
+  display: inline-block;
+  position: relative;
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-decoration-thickness: .75px;
+  text-underline-offset: 4px;
+}
+
+.reader-credits a { white-space: nowrap; }
+.reader-credits a.credit-url { display: inline; white-space: normal; }
+.reader-source a { display: inline-flex; align-items: center; gap: 2px; text-decoration: none; }
+.source-link-label { text-decoration: underline; text-decoration-thickness: .75px; text-underline-offset: 4px; }
+.reader-source .material-icon { font-size: 1em; }
+.reader-card h2, .reader-card p, .reader-card dt, .reader-card dd, .reader-card a { transition: color .5s; }
+@media (hover: hover) and (pointer: fine) {
+  .reader-card a:hover { color: #000; }
+}
+
+.reader-image-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  background: #f5f5f5;
+  text-align: center;
+}
+
+.reader-image-error p {
+  margin: 0;
+  color: #808080;
+  font-size: 14px;
+}
+
+.reader-image-error button {
+  border: 0;
+  border-radius: 999px;
+  background: #e5e5e5;
+  color: #000;
+  font: inherit;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+
+.reader-image-error button:focus-visible,
+.reader-credits a:focus-visible {
+  outline: 2px solid #000;
+  outline-offset: 3px;
+}
+
+@media (max-width: 1024px) {
+  .reader-footer {
+    grid-template-columns: 1fr;
+  }
+
+  .reader-metadata { grid-column: auto; }
+}
+
+@media (max-width: 768px) {
+  .reader-grid {
+    grid-template-columns: 1fr;
+  }
+
+}
+
+@media (max-width: 656px) {
+  .reader-about-text { padding-right: 0; }
+}
