@@ -5,7 +5,8 @@ html:has(.all-articles) { scrollbar-gutter: auto; }
 .all-toolbar-inner { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 8px; position: relative; }
 .all-search { display: flex; align-items: center; position: relative; min-width: 0; pointer-events: auto; }
 .all-search form { display: flex; align-items: center; width: 100%; }
-.all-search input { box-sizing: border-box; width: 100%; height: 40px; margin: 0; padding: 0 12px; border: 0; border-radius: 8px; background: rgba(0,0,0,.04); color: #000; font: inherit; letter-spacing: inherit; outline: none; backdrop-filter: blur(50px); transition: background-color .5s, border-color .5s, color .5s; }
+.all-search input { box-sizing: border-box; width: 100%; height: 40px; margin: 0; padding: 0 48px 0 12px; border: 0; border-radius: 8px; background: rgba(0,0,0,.04); color: #000; font: inherit; letter-spacing: inherit; outline: none; backdrop-filter: blur(50px); transition: background-color .5s, border-color .5s, color .5s; }
+.archive-more { display: flex; justify-content: center; padding: 24px 0 16px; }
 .all-search input::placeholder { color: rgba(0,0,0,.5); opacity: 1; }
 .all-search input:focus-visible { outline: 2px solid #171717; outline-offset: 2px; }
 .all-search-arrow { position: absolute; right: 12px; display: flex; margin: -10px; padding: 10px; background: none; cursor: pointer; }

@@ -3,18 +3,9 @@ import path from "node:path";
 import { cache } from "react";
 import type { Catalog } from "./types";
 import { contentBaseUrl, isContentVersion, readRemoteContent } from "./remote-content";
+import { validateCatalog } from "./content-validation";
 
 let lastGood: { version: string; catalog: Catalog } | undefined;
-
-function validateCatalog(value: unknown): Catalog {
-  const catalog = value as Catalog;
-  if (!catalog || !Array.isArray(catalog.articles) || !Array.isArray(catalog.batchDates) ||
-      !catalog.articles.every(article => article.id && article.slug && article.title && article.cover && article.detailUrl) ||
-      new Set(catalog.articles.map(article => article.id)).size !== catalog.articles.length) {
-    throw new Error("Invalid content catalog");
-  }
-  return catalog;
-}
 
 export const readCatalog = cache(async (): Promise<Catalog> => {
   if (contentBaseUrl()) {

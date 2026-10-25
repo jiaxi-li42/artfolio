@@ -6,20 +6,28 @@ import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { updatedLabel } from "../lib/dates";
 import type { ArticleDetail, Catalog } from "../lib/types";
-import ArticleReader from "./ArticleReader";
+import ArticleReader, { ReaderErrorBoundary } from "./ArticleReader";
+import { validateArticleDetail } from "../lib/content-validation";
+import ContentError from "./ContentError";
 import { ArchiveNavigation } from "./ArchiveTransition";
+import { directoryLayout, directoryWindow, restoredDirectoryScroll } from "../lib/directory-window";
 
 gsap.registerPlugin(ScrollTrigger);
+let mountedDirectory = false;
 
 export default function Artfolio({ catalog, initialId, initialReading, emptyMessage }: {
   catalog: Catalog; initialId: string | null; initialReading: boolean; emptyMessage: string;
 }) {
   const navigateArchive = useContext(ArchiveNavigation);
   const nav = useRef<HTMLElement>(null);
-  const sentinel = useRef<HTMLDivElement>(null);
+  const detailCache = useRef(new Map<string, ArticleDetail>());
   const focusAfterLoad = useRef(false);
   const directoryScroll = useRef(0);
+  const directoryStep = useRef(106);
+  const directoryViewport = useRef({ width: 0, height: 0 });
+  const directoryInput = useRef(false);
   const archiveDirectoryTarget = useRef<string | null>(null);
+  const pendingDirectoryScroll = useRef<number | null>(null);
   const readingCard = useRef<HTMLDivElement>(null);
   const readingContent = useRef<HTMLDivElement>(null);
   const finishDesktop = useRef<(() => void) | null>(null);
@@ -35,10 +43,20 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [mobileReading, setMobileReading] = useState(initialReading);
-  const [visibleCount, setVisibleCount] = useState(Math.max(9, catalog.articles.findIndex(article => article.id === initialId) + 1));
-  const visible = useMemo(() => catalog.articles.slice(0, visibleCount), [catalog.articles, visibleCount]);
+  const [desktop, setDesktop] = useState(false);
+  const [range, setRange] = useState(() => directoryWindow(0, catalog.articles.length));
+  const [layout, setLayout] = useState({ step: 106, header: 311 });
+  const step = layout.step;
+  const visible = useMemo(() => catalog.articles.slice(range.start, range.end), [catalog.articles, range]);
   const selected = catalog.articles.find(article => article.id === selectedId);
-  const desktopReady = desktopPhase === "entering" && (!selected || Boolean(detail) || error);
+  const desktopReady = desktopPhase === "entering";
+  const shouldRead = desktop || mobileReading;
+
+  function showDirectoryIndex(index: number) {
+    const layout = directoryLayout(window.innerWidth, window.innerHeight);
+    const next = directoryWindow(index, catalog.articles.length, layout.viewportRows);
+    setRange(previous => previous.start === next.start && previous.end === next.end ? previous : next);
+  }
 
   useLayoutEffect(() => {
     const previousRestoration = window.history.scrollRestoration;
@@ -47,19 +65,33 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     window.scrollTo({ top: 0, behavior: "instant" });
     nav.current?.scrollTo({ top: 0, behavior: "instant" });
     const url = new URL(window.location.href);
+    const reload = !mountedDirectory && (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)?.type === "reload";
+    mountedDirectory = true;
     if (initialId && url.searchParams.get("from") === "all") {
       archiveDirectoryTarget.current = initialId;
-      setVisibleCount(catalog.articles.length);
+      showDirectoryIndex(catalog.articles.findIndex(article => article.id === initialId));
       url.searchParams.delete("from");
       window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    } else {
+      const saved = window.history.state?.artfolio;
+      if (!reload && saved && (url.pathname === "/" || saved.id === initialId) && Number.isFinite(saved.scroll) && saved.scroll >= 0) {
+        directoryScroll.current = restoredDirectoryScroll(saved, window.innerWidth, window.innerHeight);
+        pendingDirectoryScroll.current = directoryScroll.current;
+        const layout = directoryLayout(window.innerWidth, window.innerHeight);
+        showDirectoryIndex(Math.floor(Math.max(0, directoryScroll.current - layout.header) / layout.step));
+        if (url.pathname === "/" && window.innerWidth <= 656 && catalog.articles.some(article => article.id === saved.id)) setSelectedId(saved.id);
+      }
     }
     return () => ScrollTrigger.clearScrollMemory(previousRestoration);
   }, []);
 
   useLayoutEffect(() => {
-    window.history.replaceState({ ...window.history.state, artfolio: { id: initialId, reading: initialReading, scroll: 0 } }, "", window.location.href);
+    const layout = directoryLayout(window.innerWidth, window.innerHeight);
+    window.history.replaceState({ ...window.history.state, artfolio: { id: initialId, reading: initialReading, scroll: directoryScroll.current, step: layout.step, header: layout.header } }, "", window.location.href);
     const restore = (event: PopStateEvent) => {
+      if (location.pathname === "/all") return;
       archiveDirectoryTarget.current = null;
+      pendingDirectoryScroll.current = null;
       const entry = event.state?.artfolio;
       const fallback = catalog.articles.find(article => `/${article.slug}` === location.pathname) || catalog.articles[0];
       const home = location.pathname === "/" && !location.search;
@@ -75,13 +107,13 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
       setSelectedId(id);
       setDetail(null);
       setError(false);
-      setRetry(value => value + 1);
       setMobileReading(reading);
       const article = catalog.articles.find(item => item.id === id);
       document.title = location.pathname !== "/" && article ? `${article.title} | ARTFOLIO` : "ARTFOLIO";
-      setVisibleCount(count => Math.max(count, catalog.articles.findIndex(article => article.id === id) + 1));
       focusAfterLoad.current = reading;
-      directoryScroll.current = Number.isFinite(entry?.scroll) && entry.scroll >= 0 ? entry.scroll : 0;
+      directoryScroll.current = restoredDirectoryScroll(entry ?? {}, window.innerWidth, window.innerHeight);
+      const layout = directoryLayout(window.innerWidth, window.innerHeight);
+      showDirectoryIndex(Math.floor(Math.max(0, directoryScroll.current - layout.header) / layout.step));
       window.scrollTo({ top: 0, behavior: "instant" });
       navigationFrame.current = requestAnimationFrame(() => {
         ScrollTrigger.refresh();
@@ -94,6 +126,14 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     window.addEventListener("popstate", restore);
     return () => { window.removeEventListener("popstate", restore); cancelAnimationFrame(navigationFrame.current); };
   }, [catalog, initialId, initialReading]);
+
+  useLayoutEffect(() => {
+    const screen = matchMedia("(min-width: 657px)");
+    const update = () => setDesktop(screen.matches);
+    update();
+    screen.addEventListener("change", update);
+    return () => screen.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     document.title = location.pathname !== "/" && selected ? `${selected.title} | ARTFOLIO` : "ARTFOLIO";
@@ -114,20 +154,47 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     const element = nav.current;
     if (!element) return;
     const measure = () => {
-      const small = window.innerWidth <= 768;
-      const step = small ? 86 : 106;
-      const halfCard = small ? 40 : 53;
-      const rows = Math.max(1, Math.floor((window.innerHeight - 200) / step));
-      element.style.setProperty("--header-height", `${Math.max(260, window.innerHeight - rows * step + halfCard)}px`);
+      directoryInput.current = false;
+      const { step, header } = directoryLayout(window.innerWidth, window.innerHeight);
+      const previousHeader = parseFloat(element.style.getPropertyValue("--header-height")) || 311;
+      const scroll = pendingDirectoryScroll.current ?? directoryScroll.current;
+      if (directoryViewport.current.width && !archiveDirectoryTarget.current && scroll > previousHeader && (directoryStep.current !== step || header !== previousHeader || Math.abs(element.scrollTop - scroll) > 1)) {
+        const index = (scroll - previousHeader) / directoryStep.current;
+        directoryScroll.current = header + index * step;
+        pendingDirectoryScroll.current = directoryScroll.current;
+        showDirectoryIndex(Math.floor(index));
+      }
+      directoryStep.current = step;
+      directoryViewport.current = { width: window.innerWidth, height: window.innerHeight };
+      setLayout({ step, header });
+      element.style.setProperty("--header-height", `${header}px`);
+      updateRange();
+    };
+    const updateRange = () => {
+      if (archiveDirectoryTarget.current || pendingDirectoryScroll.current !== null || !element.clientHeight || directoryViewport.current.width !== window.innerWidth || directoryViewport.current.height !== window.innerHeight) return;
+      const header = element.querySelector<HTMLElement>(".nav-header")?.offsetHeight ?? 311;
+      if (directoryInput.current) directoryScroll.current = element.scrollTop;
+      showDirectoryIndex(Math.floor(Math.max(0, element.scrollTop - header) / (window.innerWidth <= 768 ? 86 : 106)));
+      if (directoryInput.current && location.pathname !== "/all" && window.history.state?.artfolio) window.history.replaceState({ ...window.history.state,
+        artfolio: { ...window.history.state.artfolio, scroll: directoryScroll.current, step: directoryStep.current, header },
+      }, "", location.href);
     };
     measure();
+    const userScroll = () => { directoryInput.current = true; };
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
+    element.addEventListener("scroll", updateRange, { passive: true });
+    element.addEventListener("wheel", userScroll, { passive: true });
+    element.addEventListener("touchstart", userScroll, { passive: true });
+    element.addEventListener("keydown", userScroll);
+    return () => {
+      window.removeEventListener("resize", measure); element.removeEventListener("scroll", updateRange);
+      element.removeEventListener("wheel", userScroll); element.removeEventListener("touchstart", userScroll); element.removeEventListener("keydown", userScroll);
+    };
+  }, [catalog.articles.length]);
 
   useLayoutEffect(() => {
     const element = nav.current;
-    if (!element) return;
+    if (!element?.clientHeight) return;
     const media = gsap.matchMedia();
     media.add({ motion: "(prefers-reduced-motion: no-preference)", small: "(max-width: 768px)" }, context => {
       if (!context.conditions?.motion) return;
@@ -153,37 +220,49 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
         }
       });
     }, element);
-    const refresh = () => { ScrollTrigger.refresh(); alignArchiveDirectory(); };
+    const refresh = () => {
+      ScrollTrigger.refresh(); alignArchiveDirectory();
+      if (pendingDirectoryScroll.current !== null && element.clientHeight) {
+        element.scrollTop = pendingDirectoryScroll.current;
+        directoryScroll.current = element.scrollTop;
+        pendingDirectoryScroll.current = null;
+        ScrollTrigger.update();
+      }
+    };
     const frame = requestAnimationFrame(refresh);
-    const observer = archiveDirectoryTarget.current ? new ResizeObserver(() => {
-      if (archiveDirectoryTarget.current && element.clientHeight) refresh();
+    const observer = archiveDirectoryTarget.current || pendingDirectoryScroll.current !== null ? new ResizeObserver(() => {
+      if ((archiveDirectoryTarget.current || pendingDirectoryScroll.current !== null) && element.clientHeight) refresh();
     }) : null;
     observer?.observe(element);
     return () => { cancelAnimationFrame(frame); observer?.disconnect(); media.revert(); };
-  }, [visible]);
+  }, [visible, layout, desktop, mobileReading, readerPhase]);
 
   useEffect(() => {
-    if (!sentinel.current || visibleCount >= catalog.articles.length) return;
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(count => Math.min(count + 6, catalog.articles.length));
-    }, { root: nav.current, rootMargin: "160px" });
-    observer.observe(sentinel.current);
-    return () => observer.disconnect();
-  }, [catalog.articles.length, visibleCount]);
-
-  useEffect(() => {
-    if (!selected) return;
+    if (!selected || !shouldRead) return;
+    const cached = detailCache.current.get(selected.detailUrl);
+    if (cached) {
+      detailCache.current.delete(selected.detailUrl);
+      detailCache.current.set(selected.detailUrl, cached);
+      setDetail(cached); setError(false); return;
+    }
     const controller = new AbortController();
+    const timeout = setTimeout(() => { setError(true); controller.abort(); }, 20000);
     setError(false);
     fetch(selected.detailUrl, { signal: controller.signal })
       .then(response => { if (!response.ok) throw new Error("Article unavailable"); return response.json(); })
-      .then((article: ArticleDetail) => {
-        if (article.id !== selected.id || !Array.isArray(article.images) || !Array.isArray(article.bodyParagraphs)) throw new Error("Invalid article record");
-        if (!controller.signal.aborted) setDetail(article);
+      .then((value: unknown) => {
+        const article = validateArticleDetail(value, selected.id);
+        if (!controller.signal.aborted) {
+          detailCache.current.delete(selected.detailUrl);
+          detailCache.current.set(selected.detailUrl, article);
+          if (detailCache.current.size > 8) detailCache.current.delete(detailCache.current.keys().next().value!);
+          setDetail(article);
+        }
       })
-      .catch(() => { if (!controller.signal.aborted) setError(true); });
-    return () => controller.abort();
-  }, [selected, retry]);
+      .catch(() => { if (!controller.signal.aborted) setError(true); })
+      .finally(() => clearTimeout(timeout));
+    return () => { clearTimeout(timeout); controller.abort(); };
+  }, [selected, retry, shouldRead]);
 
   useEffect(() => {
     if (!detail || !focusAfterLoad.current || readerPhase !== "idle" || desktopPhase !== "idle") return;
@@ -245,7 +324,7 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     if (readerPhase === "idle") return;
     const card = readingCard.current, content = readingContent.current, directory = nav.current;
     const source = directory?.querySelector<HTMLAnchorElement>(`a[data-article-id="${selectedId}"]`);
-    if (!card || !content || !directory || !source) { setReaderPhase("idle"); return; }
+    if (!card || !content || !directory || !source) { if (readerPhase === "closing") restoreDirectory(); setReaderPhase("idle"); return; }
     const previousOverflow = document.documentElement.style.overflow;
     const previousVisibility = source.style.visibility;
     const collapse = card.querySelector("button")!;
@@ -312,6 +391,7 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
 
   function select(id: string) {
     if (readerPhase !== "idle") return;
+    directoryInput.current = false;
     cancelAnimationFrame(navigationFrame.current);
     if (window.innerWidth > 656) {
       if (id !== selectedId || desktopPhase !== "idle") {
@@ -345,7 +425,8 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     directoryScroll.current = directory.scrollTop;
     archiveDirectoryTarget.current = null;
     ScrollTrigger.update();
-    window.history.replaceState({ ...window.history.state, artfolio: { ...window.history.state?.artfolio, scroll: directoryScroll.current } }, "", window.location.href);
+    const layout = directoryLayout(window.innerWidth, window.innerHeight);
+    window.history.replaceState({ ...window.history.state, artfolio: { ...window.history.state?.artfolio, scroll: directoryScroll.current, step: layout.step, header: layout.header } }, "", window.location.href);
   }
 
   function commitDesktopSelection() {
@@ -403,12 +484,13 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
     const url = reading && article ? `/${article.slug}` : "/";
     const current = window.history.state?.artfolio;
     if (location.pathname === url && !location.search && current?.id === id && current?.reading === reading) return;
-    window.history.pushState({ artfolio: { id, reading, scroll: directoryScroll.current } }, "", url);
+    const layout = directoryLayout(window.innerWidth, window.innerHeight);
+    window.history.pushState({ artfolio: { id, reading, scroll: directoryScroll.current, step: layout.step, header: layout.header } }, "", url);
     document.title = reading && article ? `${article.title} | ARTFOLIO` : "ARTFOLIO";
   }
 
   const phase = desktopPhase === "idle" ? readerPhase : desktopPhase === "leaving" ? "closing" : "opening";
-  return <div className="artfolio" data-route-ready={!selected || Boolean(detail) || error} data-page-mode={mobileReading ? "reading" : "directory"} data-reader-phase={phase} data-desktop-phase={desktopPhase}>
+  return <div className="artfolio" data-route-ready="true" data-page-mode={mobileReading ? "reading" : "directory"} data-reader-phase={phase} data-desktop-phase={desktopPhase}>
     <a className="skip-link" href="#reading-area">Skip to article</a>
     <aside className="article-nav" ref={nav} aria-label="Article directory" inert={readerPhase !== "idle"}>
       <header className="nav-header">
@@ -425,8 +507,8 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
         </div>
       </header>
       {!selected && !initialId && <p className="mobile-empty empty-state" role="status">{emptyMessage}</p>}
-      <nav className="article-cards" aria-label="Articles, newest batch first">
-        {visible.map((article, index) => <div className="nav-card" key={article.id} style={{ zIndex: catalog.articles.length - index }}>
+      <nav className="article-cards" aria-label="Articles, newest batch first" style={{ paddingTop: range.start * step, paddingBottom: (catalog.articles.length - range.end) * step }}>
+        {visible.map((article, index) => <div className="nav-card" key={article.id} style={{ zIndex: catalog.articles.length - range.start - index }}>
           <a className="article-card" href={`/${article.slug}`} data-article-id={article.id}
             aria-current={selectedId === article.id ? "true" : undefined}
             aria-label={`${article.sourceLabel}: ${article.title}`} onClick={event => {
@@ -434,12 +516,12 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
               event.preventDefault(); select(article.id);
             }}>
             <span className="card-shade" aria-hidden="true" />
-            <span className="card-image"><img src={article.cover.thumbnail} alt="" width="65" height="65" loading={index < 6 ? "eager" : "lazy"} /></span>
+            <span className="card-image"><img src={article.cover.thumbnail} alt="" width="65" height="65" loading={range.start === 0 && index < 6 ? "eager" : "lazy"} /></span>
             <span className="card-copy"><span className="card-source">{article.sourceLabel}</span><span className="card-title">{article.title}</span></span>
           </a>
         </div>)}
       </nav>
-      <div ref={sentinel} className="directory-sentinel" aria-hidden="true" />
+      <div className="directory-sentinel" aria-hidden="true" />
     </aside>
     <main className="reading-area" id="reading-area" aria-label="Selected article" aria-busy={phase !== "idle" || Boolean(selected && !detail && !error)} inert={phase !== "idle"}>
       {selected && <div className="reading-card" ref={readingCard}>
@@ -448,7 +530,7 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
         <button className="reading-collapse" type="button" onClick={back}>Collapse</button>
       </div>}
       <div className="reading-content" ref={readingContent}>
-        {!selected ? !initialId && <p className="empty-state">{emptyMessage}</p> : error ? <div className="empty-state" role="alert"><p>This article couldn’t be loaded.</p><button type="button" onClick={() => setRetry(value => value + 1)}>Try again</button></div> : detail ? <ArticleReader key={detail.id} article={detail} onRead={() => setMobileReading(true)} /> : <div className="reader-loading" role="status" style={{ aspectRatio: `${selected.cover.width} / ${selected.cover.height}` }}><span className="sr-only">Loading article</span></div>}
+        {!shouldRead ? null : !selected ? !initialId && <p className="empty-state">{emptyMessage}</p> : error ? <ContentError onRetry={() => { detailCache.current.delete(selected.detailUrl); setRetry(value => value + 1); }} /> : detail ? <ReaderErrorBoundary key={`${detail.id}:${retry}`} onRetry={() => { detailCache.current.delete(selected.detailUrl); setDetail(null); setRetry(value => value + 1); }}><ArticleReader key={detail.id} article={detail} onRead={() => setMobileReading(true)} /></ReaderErrorBoundary> : <div className="reader-loading" role="status" style={{ aspectRatio: `${selected.cover.width} / ${selected.cover.height}` }}><span className="sr-only">Loading article</span></div>}
       </div>
     </main>
   </div>;

@@ -1,21 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArchiveNavigation } from "./ArchiveTransition";
 import MaterialIcon from "./MaterialIcon";
 import { updatedLabel } from "../lib/dates";
 import type { ArticleSummary } from "../lib/types";
+import { articleMatches, articleSources, sourceOption } from "../lib/article-search";
 import "./all-articles.css";
 
 type ArticleGroup = {
   date: string;
-  articles: Pick<ArticleSummary, "id" | "slug" | "title" | "sourceLabel">[];
+  articles: Pick<ArticleSummary, "id" | "slug" | "title" | "source" | "sourceLabel">[];
 };
 
-type ArchivePosition = { query: string; top: number; cards: Record<string, number> };
-const sources = ["Teeth Magazine", "Aperture", "It’s Nice That", "C41 Magazine", "PHROOM"];
-const normalise = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim();
+type ArchivePosition = { query: string; source?: string; limit?: number; top: number; cards: Record<string, number> };
 
 function updateScrollEdges(scroller: HTMLElement) {
   const card = scroller.parentElement!;
@@ -23,29 +22,38 @@ function updateScrollEdges(scroller: HTMLElement) {
   card.dataset.atBottom = String(scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 1);
 }
 
-export default function AllArticles({ groups, initialSearch }: { groups: ArticleGroup[]; initialSearch: string }) {
+export default function AllArticles({ groups, initialSearch, initialSource = "" }: { groups: ArticleGroup[]; initialSearch: string; initialSource?: string }) {
   const navigateArchive = useContext(ArchiveNavigation);
   const grid = useRef<HTMLDivElement>(null);
   const results = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const more = useRef<HTMLDivElement>(null);
   const animation = useRef<Animation | null>(null);
   const request = useRef(0);
   const enterAfterUpdate = useRef(false);
   const composing = useRef(false);
   const restorePosition = useRef<ArchivePosition | null>(null);
-  const [query, setQuery] = useState(initialSearch);
-  const [draft, setDraft] = useState(initialSearch);
+  const [query, setQuery] = useState(sourceOption(initialSource)?.label ?? initialSearch);
+  const [source, setSource] = useState(sourceOption(initialSource)?.id ?? "");
+  const [draft, setDraft] = useState(sourceOption(initialSource)?.label ?? initialSearch);
+  const [limit, setLimit] = useState(24);
   const [showSources, setShowSources] = useState(false);
   const [filtering, setFiltering] = useState(false);
   const canClear = Boolean(query) && draft === query;
-  const visibleGroups = useMemo(() => {
-    const terms = normalise(query).split(" ").filter(Boolean);
-    return groups.map(group => ({ ...group, articles: group.articles.filter(article => {
-      const text = normalise(`${article.sourceLabel} ${article.title}`);
-      return terms.every(term => text.includes(term));
-    }) })).filter(group => group.articles.length);
-  }, [groups, query]);
-  const count = visibleGroups.reduce((total, group) => total + group.articles.length, 0);
+  const matchingGroups = useMemo(() => groups.map(group => ({ ...group,
+    articles: group.articles.filter(article => articleMatches(article, query, source)),
+  })).filter(group => group.articles.length), [groups, query, source]);
+  const visibleGroups = useMemo(() => matchingGroups.slice(0, limit), [matchingGroups, limit]);
+  const count = matchingGroups.reduce((total, group) => total + group.articles.length, 0);
+
+  useEffect(() => {
+    if (!more.current || limit >= matchingGroups.length) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setLimit(value => value + 24);
+    }, { rootMargin: "600px" });
+    observer.observe(more.current);
+    return () => observer.disconnect();
+  }, [limit, matchingGroups.length]);
 
   function stopAnimation() {
     if (!animation.current) return;
@@ -62,11 +70,16 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
       results.current?.style.removeProperty("opacity");
       setFiltering(false);
       if (location.pathname !== "/all") return;
-      const value = new URLSearchParams(location.search).get("search") ?? "";
+      const params = new URLSearchParams(location.search);
+      const option = sourceOption(params.get("source") ?? "");
+      const value = option?.label ?? params.get("search") ?? "";
+      const nextSource = option?.id ?? "";
       const saved: ArchivePosition | undefined = window.history.state?.artfolioArchive;
-      restorePosition.current = saved?.query === value ? saved : { query: value, top: 0, cards: {} };
+      restorePosition.current = saved?.query === value && (saved.source ?? "") === nextSource ? saved : { query: value, source: nextSource, top: 0, cards: {} };
+      setLimit(Math.min(groups.length || 24, Math.max(24, restorePosition.current.limit ?? 24)));
       setQuery(value);
       setDraft(value);
+      setSource(nextSource);
       setShowSources(false);
     };
     restore();
@@ -110,7 +123,7 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
     let active = true;
     document.fonts.ready.then(() => { if (active) updateEdges(); });
     return () => { active = false; cancelAnimationFrame(frame); observer.disconnect(); };
-  }, [visibleGroups, query]);
+  }, [visibleGroups, query, source]);
 
   useLayoutEffect(() => {
     if (!enterAfterUpdate.current || !results.current) return;
@@ -127,9 +140,9 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
       setFiltering(false);
     };
     return () => { incoming.onfinish = null; incoming.cancel(); };
-  }, [query]);
+  }, [query, source]);
 
-  async function search(value: string) {
+  async function search(value: string, nextSource = "") {
     const next = value.trim().replace(/\s+/g, " ");
     const element = results.current;
     const opacity = element ? getComputedStyle(element).opacity : "1";
@@ -137,7 +150,7 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
     stopAnimation();
     setDraft(next);
     setShowSources(false);
-    if (next === query) { element?.style.removeProperty("opacity"); setFiltering(false); return; }
+    if (next === query && nextSource === source) { element?.style.removeProperty("opacity"); setFiltering(false); return; }
     setFiltering(true);
     if (element && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
       const outgoing = element.animate([{ opacity }, { opacity: 0 }], { duration: 300, easing: "ease", fill: "forwards" });
@@ -148,11 +161,14 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
     if (element) element.style.opacity = "0";
     stopAnimation();
     const url = new URL(location.href);
-    if (next) url.searchParams.set("search", next); else url.searchParams.delete("search");
-    const position: ArchivePosition = { query: next, top: 0, cards: {} };
+    if (next && !nextSource) url.searchParams.set("search", next); else url.searchParams.delete("search");
+    if (nextSource) url.searchParams.set("source", nextSource); else url.searchParams.delete("source");
+    const position: ArchivePosition = { query: next, source: nextSource, limit: 24, top: 0, cards: {} };
     window.history.replaceState({ ...window.history.state, artfolioArchive: position }, "", `${url.pathname}${url.search}${url.hash}`);
     restorePosition.current = position;
     enterAfterUpdate.current = true;
+    setLimit(24);
+    setSource(nextSource);
     setQuery(next);
   }
 
@@ -165,7 +181,7 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
     const cards = Object.fromEntries([...grid.current!.querySelectorAll<HTMLElement>(".date-card")].map(card => [
       card.dataset.batchDate!, card.querySelector<HTMLElement>(".date-card-inner")!.scrollTop,
     ]));
-    window.history.replaceState({ ...window.history.state, artfolioArchive: { query, top: scrollY, cards } }, "", location.href);
+    window.history.replaceState({ ...window.history.state, artfolioArchive: { query, source, limit, top: scrollY, cards } }, "", location.href);
     navigateArchive(href);
   }
 
@@ -191,7 +207,7 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
             </button>
           </form>
           {showSources && !draft.trim() && <div className="all-source-shortcuts" role="group" aria-label="Filter by source">
-            {["All", ...sources].map(source => <button key={source} type="button" onClick={() => { input.current?.focus({ preventScroll: true }); void search(source === "All" ? "" : source); }}><span>{source}</span></button>)}
+            {[{ id: "", label: "All" }, ...articleSources].map(option => <button key={option.id} type="button" onClick={() => { input.current?.focus({ preventScroll: true }); void search(option.id ? option.label : "", option.id); }}><span>{option.label}</span></button>)}
           </div>}
         </div>
         <Link href="/" className="all-close" aria-label="Close all articles" onNavigate={event => { event.preventDefault(); leave("/"); }}>
@@ -218,6 +234,7 @@ export default function AllArticles({ groups, initialSearch }: { groups: Article
         </div>
       </section>)}
       </div>
+      {limit < matchingGroups.length && <div className="archive-more" ref={more}><button className="show-all" type="button" onClick={() => setLimit(value => value + 24)}>Load more dates</button></div>}
     </div>
   </main>;
 }

@@ -1,11 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { Component, useState } from "react";
 import type { ArticleDetail, ArticleImage } from "../lib/types";
 import ArticleImageMedia from "./ArticleImage";
 import ImageGallery from "./ImageGallery";
 import MaterialIcon from "./MaterialIcon";
 import "./reader.css";
+import ContentError from "./ContentError";
+
+export class ReaderErrorBoundary extends Component<{ children: React.ReactNode; onRetry: () => void }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error: Error) { console.error("Article rendering failed", error); }
+  render() { return this.state.failed ? <ContentError onRetry={this.props.onRetry} /> : this.props.children; }
+}
 
 function ImageFigure({ image, first = false, onOpen }: { image: ArticleImage; first?: boolean; onOpen: () => void }) {
   return (

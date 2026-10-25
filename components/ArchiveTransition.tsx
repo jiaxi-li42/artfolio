@@ -66,8 +66,7 @@ export default function ArchiveTransition({ children }: { children: React.ReactN
     let frame = 0;
     const reveal = () => {
       if (!destination.current || pathname !== new URL(destination.current, location.origin).pathname) return;
-      const selector = pathname === "/all" ? ".all-articles" : ".artfolio";
-      const page = [...element.querySelectorAll<HTMLElement>(selector)].find(page => page.getClientRects().length);
+      const page = [...element.querySelectorAll<HTMLElement>('[data-route-ready="true"]')].find(page => page.getClientRects().length);
       if (!page || page.dataset.routeReady !== "true") return;
       observer.disconnect();
       // Allow the directory's scheduled ScrollTrigger refresh and positioning to finish first.
@@ -83,5 +82,6 @@ export default function ArchiveTransition({ children }: { children: React.ReactN
 
   return <ArchiveNavigation value={navigate}>
     <div ref={root} data-archive-phase={phase} aria-busy={phase !== "idle"} inert={phase !== "idle"}>{children}</div>
+    {phase === "waiting" && <div className="route-pending" role="status">Loading articles…</div>}
   </ArchiveNavigation>;
 }

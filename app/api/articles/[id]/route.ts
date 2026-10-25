@@ -1,5 +1,5 @@
-import type { ArticleDetail } from "../../../../lib/types";
 import { contentBaseUrl, isContentVersion, readRemoteContent } from "../../../../lib/remote-content";
+import { validateArticleDetail } from "../../../../lib/content-validation";
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -9,11 +9,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   }
   if (!contentBaseUrl()) return Response.json({ error: "Article not found" }, { status: 404 });
   try {
-    const detail = await readRemoteContent(`articles/${id}/${version}.json`, version) as ArticleDetail;
-    if (detail.id !== id || !detail.title || !Array.isArray(detail.images) || !detail.images.length ||
-        !Array.isArray(detail.bodyParagraphs) || !Array.isArray(detail.credits)) {
-      throw new Error("Invalid article detail");
-    }
+    const detail = validateArticleDetail(await readRemoteContent(`articles/${id}/${version}.json`, version), id);
     return Response.json(detail, { headers: { "Cache-Control": "public, max-age=31536000, immutable" } });
   } catch (error) {
     console.error("Article content unavailable", error);

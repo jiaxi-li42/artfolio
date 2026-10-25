@@ -24,6 +24,7 @@ from bs4 import BeautifulSoup
 from PIL import Image
 from source_metadata import extract_metadata, extract_reading_body
 from content_store import ContentIssue, RetryableFetchError, atomic_write, save
+from content_validation import published_date
 
 OUT = Path(__file__).resolve().parent.parent / "data" / "sources"
 AGENT = "Artfolio/0.1 (public article acquisition)"
@@ -97,8 +98,19 @@ def read_url(url, limit=5_000_000, headers=None, robots=False):
     for attempt in range(3):
         check_deadline()
         try:
-            with urllib.request.build_opener(SafeRedirect(robots)).open(req, timeout=25) as r:
-                raw = r.read(limit + 1)
+            with urllib.request.build_opener(SafeRedirect(robots)).open(req, timeout=min(25, max(.1, DEADLINE - time.monotonic()))) as r:
+                chunks, size = [], 0
+                read = getattr(r, 'read1', r.read)
+                while True:
+                    check_deadline()
+                    chunk = read(min(65536, limit + 1 - size))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > limit:
+                        raise ContentIssue(f'Resource exceeds validation bound {limit}')
+                raw = b''.join(chunks)
                 if len(raw) > limit:
                     raise ContentIssue(f"Resource exceeds validation bound {limit}")
                 return raw, {"url": url, "final_url": r.url, "status": r.status,
@@ -130,6 +142,8 @@ def read_url(url, limit=5_000_000, headers=None, robots=False):
             failure, delay = error, 2 ** attempt
         if attempt == 2:
             raise RetryableFetchError(str(failure)) from failure
+        if time.monotonic() + max(0, delay) + .5 >= DEADLINE:
+            raise RetryableFetchError('Source time budget reached', retry_after=max(0, delay)) from failure
         time.sleep(max(0, delay) + random.uniform(0, 0.5))
 
 
@@ -166,12 +180,12 @@ def public_read(url, limit=5_000_000, headers=None):
     return raw, meta
 
 
-def feed_items(raw):
+def feed_items(raw, issues=None):
     try:
         root = ET.fromstring(raw.decode("utf-8-sig").lstrip())
     except (ET.ParseError, UnicodeError) as error:
         raise ContentIssue('Feed is not valid RSS/Atom XML') from error
-    result, invalid = [], 0
+    result, invalid = [], []
     for item in root.iter():
         if item.tag.split("}")[-1] not in {"item", "entry"}:
             continue
@@ -187,10 +201,12 @@ def feed_items(raw):
             elif key not in parts:
                 parts[key] = e.text or ""
         link = parts.get("origLink") or parts.get("link")
-        if not link:
-            continue
         stamp = parts.get("published") or parts.get("pubDate") or parts.get("updated", "")
         try:
+            if not parts.get('title', '').strip():
+                raise ValueError('Missing article title')
+            if not link:
+                raise ValueError('Missing article URL')
             try:
                 when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             except ValueError:
@@ -201,18 +217,19 @@ def feed_items(raw):
             target = urlsplit(link)
             if target.scheme != 'https' or not target.hostname or target.username or target.password:
                 raise ValueError('Invalid feed article URL')
-        except (ValueError, TypeError, OverflowError):
-            invalid += 1
+        except (ValueError, TypeError, OverflowError) as error:
+            invalid.append({'title': parts.get('title', '')[:500], 'url': str(link or '')[:2000], 'error': str(error)[:500]})
             continue
         # Full RSS HTML stays in the private feed file, not in the growing job ledger.
         entry = {key: parts[key] for key in ['title', 'terms', 'creator', 'feed_author', 'guid', 'id'] if key in parts}
         entry.update(url=canonical(link), published_at=when.isoformat(), sort_at=when.timestamp())
         result.append(entry)
-    if invalid:
-        # Never turn an unparseable feed item into a silent "no new articles" result.
-        raise ContentIssue(f'Feed has {invalid} invalid URL/date entries')
+    if issues is not None:
+        issues.extend(invalid)
+    elif invalid:
+        print(f'::warning::RSS: {len(invalid)} malformed entries isolated', flush=True)
     if not result:
-        raise ContentIssue('Feed contains no dated public article entries')
+        raise ContentIssue(f'Feed contains no valid article entries; {len(invalid)} entries need review')
     return sorted(result, key=lambda x: x["sort_at"], reverse=True)
 
 
@@ -397,7 +414,7 @@ def extract(name):
                "references": [r for r in metadata["credits"] if r["label"] in {"Notes", "References", "Bibliography"}],
                "metadata_provenance": metadata["provenance"]}
     data = {"site": name, "url": url, "title": title,
-            "published_at": meta.get("article:published_time") or selected["published_at"],
+            "published_at": published_date(meta.get("article:published_time") or selected["published_at"]),
             "modified_at": meta.get("article:modified_time"), "authors": authors,
             "description": meta.get("description") or meta.get("og:description"),
             "body_paragraphs": paragraphs, "body_text": body_text,

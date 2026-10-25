@@ -8,6 +8,7 @@ export type ArticleImage = {
   caption: string;
   alt: string;
   frames: number;
+  previewWidth?: number;
 };
 
 export type ArticleSummary = {

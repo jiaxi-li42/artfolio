@@ -31,7 +31,7 @@ function GalleryImage({ image, index, active, viewport }: { image: ImageRecord; 
   }, []);
   const width = Math.max(1, Math.min(viewport.width - 16, (viewport.height - 112 - captionHeight - (image.caption.trim() ? 8 : 0)) * image.width / image.height));
   return <figure className="gallery-figure" data-index={index} data-image-id={image.id} style={{ width }}>
-    <ArticleImage image={image} first={active} />
+    <ArticleImage image={image} first={active} fullSize sizes={`${Math.ceil(width)}px`} />
     {image.caption.trim() && <figcaption ref={caption} tabIndex={active ? 0 : -1} className="reader-caption gallery-caption swiper-no-swiping">{image.caption}</figcaption>}
   </figure>;
 }
@@ -47,7 +47,7 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
   const previousGutter = useRef("");
   const [index, setIndex] = useState(initialIndex);
   const [phase, setPhase] = useState("entering");
-  const [touch, setTouch] = useState(() => "ontouchstart" in window || navigator.maxTouchPoints > 0);
+  const [touch, setTouch] = useState(() => matchMedia("(pointer: coarse)").matches);
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
 
   useLayoutEffect(() => {
@@ -60,7 +60,7 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
     element.querySelector<HTMLButtonElement>(".gallery-close")?.focus();
     const resize = () => {
       setViewport({ width: window.innerWidth, height: window.innerHeight });
-      setTouch("ontouchstart" in window || navigator.maxTouchPoints > 0);
+      setTouch(matchMedia("(pointer: coarse)").matches);
     };
     const pointer = matchMedia("(pointer: coarse)");
     window.addEventListener("resize", resize);
@@ -97,6 +97,7 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
   }
 
   return <dialog ref={dialog} className="image-gallery" data-touch={touch} data-phase={phase} aria-labelledby="gallery-title" onCancel={event => { event.preventDefault(); close(); }} onKeyDown={event => {
+    if (event.target instanceof Element && event.target.closest(".gallery-caption") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) { event.stopPropagation(); return; }
     if (event.key !== "Tab") return;
     const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]')].filter(element => !element.closest("[inert]") && element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
     const first = controls[0], last = controls[controls.length - 1];
@@ -111,10 +112,10 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
       <Swiper key={touch ? "touch" : "mouse"} className="gallery-stage" modules={[EffectFade, Keyboard, Navigation, Pagination, Virtual]} initialSlide={index} slidesPerView={1} speed={matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300}
         effect={touch ? "slide" : "fade"} fadeEffect={{ crossFade: true }} virtual={touch} loop={false}
         threshold={5} touchRatio={1} touchAngle={45} followFinger longSwipes longSwipesMs={300} longSwipesRatio={.5} shortSwipes resistance resistanceRatio={.85} simulateTouch={touch}
-        keyboard={{ enabled: !touch, onlyInViewport: true, pageUpDown: true }}
+        keyboard={{ enabled: true, onlyInViewport: true, pageUpDown: true }}
         navigation={touch ? false : { prevEl: ".gallery-previous", nextEl: ".gallery-next", addIcons: false }}
         pagination={{ el: ".gallery-bullets", dynamicBullets: true, dynamicMainBullets: 3, clickable: false }}
-        onSwiper={instance => { swiper.current = instance; }} onSlideChange={instance => {
+        onSwiper={instance => { swiper.current = instance; if (closing.current) instance.keyboard.disable(); }} onSlideChange={instance => {
           currentIndex.current = instance.realIndex;
           setIndex(instance.realIndex);
           if (instance.isBeginning || instance.isEnd) cursor.current?.classList.remove("visible");

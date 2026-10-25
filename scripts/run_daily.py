@@ -156,29 +156,44 @@ class Runner:
         self.checkpoint()
         version = acquisition.adapter_version()
         today = datetime.now(ZoneInfo('Europe/London')).date().isoformat()
-        feed_cache, feed_errors = {}, {}
-        for job in sorted(self.state['jobs'].values(), key=lambda row: (row['date'], ORDER.index(row['source']))):
+        feed_cache, feed_errors, source_seconds = {}, {}, {}
+        run_deadline = parser.DEADLINE
+        feed_issues = self.state.setdefault('feed_issues', {})
+        for job in sorted(self.state['jobs'].values(), key=lambda row: (row['date'] != through.isoformat(), row['date'], ORDER.index(row['source']))):
             if job['date'] > through.isoformat() or not due(job, today, version, retry):
                 continue
-            if time.monotonic() >= parser.DEADLINE:
+            if time.monotonic() >= run_deadline:
                 break
             source = job['source']
-            if source not in feed_cache and source not in feed_errors:
-                try:
-                    if self.state['feeds'].get(source):
-                        restore(self.store, self.state['feeds'][source], acquisition.OUT / 'feeds' / source)
-                    feed_cache[source], _ = acquisition.feeds(source)
-                    self.state['feeds'][source] = snapshot(self.store, acquisition.OUT / 'feeds' / source, 'feeds/' + source)
-                except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
-                    feed_errors[source] = error
-            if source in feed_errors:
-                failure(job, feed_errors[source], version)
-                self.checkpoint()
+            remaining = 360 - source_seconds.get(source, 0)
+            if remaining <= 0:
                 continue
+            started = time.monotonic()
+            parser.DEADLINE = min(run_deadline, started + remaining)
             try:
-                self.collect_job(job, feed_cache[source], version, retry)
-            except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
-                failure(job, error, version)
+                if source not in feed_cache and source not in feed_errors:
+                    try:
+                        if self.state['feeds'].get(source):
+                            restore(self.store, self.state['feeds'][source], acquisition.OUT / 'feeds' / source)
+                        feed_cache[source], receipt = acquisition.feeds(source)
+                        self.state['feeds'][source] = snapshot(self.store, acquisition.OUT / 'feeds' / source, 'feeds/' + source)
+                        if receipt.get('invalid_count'):
+                            feed_issues[source] = {'count': receipt['invalid_count'], 'checked_at': receipt.get('checked_at')}
+                            print(f"::warning::{source}: {receipt['invalid_count']} malformed RSS entries isolated", flush=True)
+                        else:
+                            feed_issues.pop(source, None)
+                    except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
+                        feed_errors[source] = error
+                if source in feed_errors:
+                    failure(job, feed_errors[source], version)
+                else:
+                    try:
+                        self.collect_job(job, feed_cache[source], version, retry)
+                    except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
+                        failure(job, error, version)
+            finally:
+                parser.DEADLINE = run_deadline
+                source_seconds[source] = source_seconds.get(source, 0) + time.monotonic() - started
             self.checkpoint()
             print(json.dumps({'date': job['date'], 'source': source, 'status': job['status']}), flush=True)
 
@@ -294,7 +309,8 @@ class Runner:
         self.state['failed_runs'] = self.state.get('failed_runs', 0) + 1 if status in {'partial', 'failed'} else 0
         report = {'runId': self.run_id, 'finishedAt': now(), 'status': status, 'release': (self.pointer or {}).get('version'),
             'counts': {name: sum(row['status'] == name for row in jobs) for name in ['published', 'no_new', 'retry', 'quarantined', 'pending', 'ready', 'held']},
-            'issues': [{'date': row['date'], 'source': row['source'], 'status': row['status'], 'error': row.get('error', '')} for row in bad]}
+            'issues': [{'date': row['date'], 'source': row['source'], 'status': row['status'], 'error': row.get('error', '')} for row in bad],
+            'feedIssues': self.state.get('feed_issues', {})}
         self.store.put_json(f'runs/{self.run_id}/report.json', report, immutable=True)
         self.checkpoint()
         return report

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import extract_articles as parser
 from content_store import ContentIssue, RetryableFetchError, atomic_write, now, save
+from content_validation import published_date, require_text, require_url
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'data' / 'acquisition'
@@ -14,7 +15,7 @@ OUT = ROOT / 'data' / 'acquisition'
 
 def adapter_version():
     return hashlib.sha256(b''.join((ROOT / 'scripts' / name).read_bytes() for name in
-        ['extract_articles.py', 'source_metadata.py', 'acquire_articles.py', 'prepare_data.py'])).hexdigest()[:16]
+        ['extract_articles.py', 'source_metadata.py', 'acquire_articles.py', 'prepare_data.py', 'content_validation.py'])).hexdigest()[:16]
 
 
 def stable_id(source, url):
@@ -27,12 +28,22 @@ def verify_record(folder):
     if complete.exists() and hashlib.sha256(raw).hexdigest() != json.loads(complete.read_text())['article_sha256']:
         raise ContentIssue('Article checksum mismatch')
     data = json.loads(raw)
+    require_text(data.get('title'), 'title')
+    require_url(data.get('url'), 'article URL', https=True)
+    published_date(data.get('published_at'))
+    if not isinstance(data.get('body_paragraphs'), list):
+        raise ContentIssue('Invalid article paragraphs')
+    for paragraph in data['body_paragraphs']:
+        require_text(paragraph, 'body paragraph')
     if data['body_text'] != '\n\n'.join(data['body_paragraphs']) or data['body_text'] != (folder / 'body.txt').read_text(encoding='utf-8'):
         raise ContentIssue('Article text files disagree')
     if not data['images'] or len(data['images']) > 100:
         raise ContentIssue('A visual article needs between 1 and 100 content images')
     total_bytes = 0
     for position, rec in enumerate(data['images'], 1):
+        parser.check_deadline()
+        for field in ['caption', 'alt']:
+            require_text(rec.get(field), field, empty=True)
         target = (folder / rec.get('local_file', '__missing__')).resolve()
         if not target.is_relative_to(folder.resolve()) or not target.is_file() or rec.get('error') or rec['position'] != position:
             raise ContentIssue('Missing, unsafe or incomplete article image')
@@ -54,7 +65,11 @@ def feeds(source):
     receipt = json.loads(receipt_path.read_bytes()) if receipt_path.exists() else {}
     raw_path = folder / 'feed-0.xml'
     if receipt and raw_path.exists() and time.time() - receipt.get('checked_epoch', 0) < 1800:
-        return parser.feed_items(raw_path.read_bytes()), receipt
+        issues = []
+        items = parser.feed_items(raw_path.read_bytes(), issues)
+        receipt.update(invalid_count=len(issues), invalid_items=issues[:100])
+        save(receipt_path, receipt)
+        return items, receipt
     headers = {}
     for header, field in [('If-None-Match', 'etag'), ('If-Modified-Since', 'last_modified')]:
         if receipt.get('response', {}).get(field) and raw_path.exists():
@@ -64,11 +79,12 @@ def feeds(source):
         if not raw_path.exists():
             raise ContentIssue('Feed returned 304 without a cached body')
         raw = raw_path.read_bytes()
-    items = parser.feed_items(raw)
+    issues = []
+    items = parser.feed_items(raw, issues)
     if response['status'] != 304:
         atomic_write(raw_path, raw)
         receipt.update(fetched_at=now(), response=response, sha256=hashlib.sha256(raw).hexdigest())
-    receipt.update(source=source, checked_at=now(), checked_epoch=time.time(), items=len(items))
+    receipt.update(source=source, checked_at=now(), checked_epoch=time.time(), items=len(items), invalid_count=len(issues), invalid_items=issues[:100])
     save(receipt_path, receipt)
     return items, receipt
 

@@ -9,6 +9,7 @@ from PIL import Image, ImageOps
 from bs4 import BeautifulSoup
 from source_metadata import extract_metadata, extract_reading_body
 from content_store import ContentIssue, json_bytes
+from content_validation import validate_detail
 
 ROOT = Path(__file__).resolve().parent.parent
 LABELS = {'teeth': 'Teeth Magazine', 'aperture': 'Aperture', 'itsnicethat': 'It’s Nice That', 'c41': 'C41 Magazine', 'phroom': 'PHROOM'}
@@ -42,12 +43,14 @@ def reading_body(article, record_path, metadata=None):
 
 def build_article(article_id, source, batch_date, folder, output, store):
     from acquire_articles import verify_record
+    from extract_articles import check_deadline
     article = verify_record(folder)
     if not re.fullmatch(r'[a-z0-9-]+', article_id):
         raise ContentIssue('Invalid article ID')
     output.mkdir(parents=True, exist_ok=True)
     images, uploads = [], {}
     for image in article['images']:
+        check_deadline()
         original = folder / image['local_file']
         digest = image['sha256']
         key = f'media/{digest}{original.suffix.lower()}'
@@ -56,9 +59,10 @@ def build_article(article_id, source, batch_date, folder, output, store):
         if image.get('frames', 1) <= 1:
             preview = output / f'{digest}-preview.webp'
             with Image.open(original) as photo:
-                photo = ImageOps.exif_transpose(photo).convert('RGB')
+                photo = ImageOps.exif_transpose(photo).convert('RGBA' if photo.has_transparency_data else 'RGB')
                 photo.thumbnail((1600, 2000))
                 photo.save(preview, 'WEBP', quality=88)
+                preview_width = photo.width
             preview_key = f"media/{hashlib.sha256(preview.read_bytes()).hexdigest()}-preview.webp"
             uploads[preview_key] = preview
         alt = image.get('alt', '').strip()
@@ -67,10 +71,13 @@ def build_article(article_id, source, batch_date, folder, output, store):
         images.append({'id': f"{article_id}-{image['position']}", 'position': image['position'],
             'src': store.url(key), 'preview': store.url(preview_key), 'width': image['width'], 'height': image['height'],
             'caption': image.get('caption', '').strip(), 'alt': alt, 'frames': image.get('frames', 1)})
+        if image.get('frames', 1) <= 1:
+            images[-1]['previewWidth'] = preview_width
     cover_digest = article['images'][0]['sha256']
     thumbnail = output / f'{cover_digest}-thumbnail.webp'
     with Image.open(folder / article['images'][0]['local_file']) as cover:
-        ImageOps.fit(ImageOps.exif_transpose(cover).convert('RGB'), (160, 160)).save(thumbnail, 'WEBP', quality=85)
+        cover = ImageOps.exif_transpose(cover).convert('RGBA' if cover.has_transparency_data else 'RGB')
+        ImageOps.fit(cover, (160, 160)).save(thumbnail, 'WEBP', quality=85)
     thumbnail_key = f"media/{hashlib.sha256(thumbnail.read_bytes()).hexdigest()}-thumbnail.webp"
     uploads[thumbnail_key] = thumbnail
     soup = BeautifulSoup((folder / 'article.html').read_text(encoding='utf-8'), 'html.parser')
@@ -79,12 +86,15 @@ def build_article(article_id, source, batch_date, folder, output, store):
         'originalUrl': article['url'], 'batchDate': batch_date, 'publishedAt': article.get('published_at'),
         'fetchedAt': article['fetched_at'], 'images': images, 'bodyParagraphs': reading_body(article, folder / 'article.json', metadata),
         'credits': metadata['credits']}
+    validate_detail(detail)
     version = hashlib.sha256(json_bytes(detail)).hexdigest()
     summary = {'id': article_id, 'batchDate': batch_date, 'source': source, 'sourceLabel': LABELS[source], 'title': article['title'],
         'cover': {**images[0], 'thumbnail': store.url(thumbnail_key)},
         'detailUrl': f'/api/articles/{article_id}?version={version}'}
     for key, file in uploads.items():
+        check_deadline()
         store.put_file(key, file, public=True, content_type=mimetypes.guess_type(file.name)[0] or 'application/octet-stream')
+    check_deadline()
     store.put_json(f'articles/{article_id}/{version}.json', detail, public=True, immutable=True)
     return summary, detail['fetchedAt']
 
