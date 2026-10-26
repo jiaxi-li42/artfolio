@@ -290,8 +290,10 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
       setDesktopPhase("idle");
     };
     const reduce = () => { if (reducedMotion.matches) complete(); };
+    const width = window.innerWidth;
+    const resize = () => { if (window.innerWidth !== width) complete(); };
     finishDesktop.current = complete;
-    window.addEventListener("resize", complete);
+    window.addEventListener("resize", resize);
     reducedMotion.addEventListener("change", reduce);
 
     if (desktopPhase === "leaving") {
@@ -314,7 +316,7 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
       animation?.cancel();
       if (preserveOpacity) content.style.opacity = opacity;
       else content.style.removeProperty("opacity");
-      window.removeEventListener("resize", complete);
+      window.removeEventListener("resize", resize);
       reducedMotion.removeEventListener("change", reduce);
       if (finishDesktop.current === complete) finishDesktop.current = null;
     };
@@ -337,7 +339,9 @@ export default function Artfolio({ catalog, initialId, initialReading, emptyMess
       if (readerPhase === "closing") restoreDirectory();
       setReaderPhase("idle");
     };
-    const resize = () => finish();
+    const width = window.innerWidth;
+    // iOS browser toolbars resize the height while scrolling; let the animation continue.
+    const resize = () => { if (window.innerWidth !== width) finish(); };
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
     const reduce = () => { if (reducedMotion.matches) finish(); };
     finishMobile.current = finish;

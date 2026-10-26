@@ -164,7 +164,8 @@ export default function AllArticles({ groups, initialSearch, initialSource = "" 
     if (next && !nextSource) url.searchParams.set("search", next); else url.searchParams.delete("search");
     if (nextSource) url.searchParams.set("source", nextSource); else url.searchParams.delete("source");
     const position: ArchivePosition = { query: next, source: nextSource, limit: 24, top: 0, cards: {} };
-    window.history.replaceState({ ...window.history.state, artfolioArchive: position }, "", `${url.pathname}${url.search}${url.hash}`);
+    // Let Next.js synchronize its URL state instead of bypassing its history wrapper.
+    window.history.replaceState({ artfolioArchive: position }, "", `${url.pathname}${url.search}${url.hash}`);
     restorePosition.current = position;
     enterAfterUpdate.current = true;
     setLimit(24);
@@ -185,11 +186,14 @@ export default function AllArticles({ groups, initialSearch, initialSource = "" 
     navigateArchive(href);
   }
 
-  return <main className="all-articles" data-route-ready="true" aria-labelledby="all-articles-heading">
+  return <main className="all-articles" data-route-ready="true" aria-labelledby="all-articles-heading" onPointerDown={event => {
+    if (event.target instanceof Element && !event.target.closest(".all-search")) setShowSources(false);
+  }}>
     <h1 id="all-articles-heading" className="sr-only" tabIndex={-1}>All articles</h1>
     <header className="all-toolbar" aria-label="Article archive toolbar">
       <div className="all-toolbar-inner">
-        <div className="all-search" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setShowSources(false); }}>
+        {/* iOS may blur the input before a shortcut's click, without a related target. */}
+        <div className="all-search" onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setShowSources(false); }}>
           <form role="search" onSubmit={event => { event.preventDefault(); if (!composing.current) void search(draft); }}>
             <input ref={input} type="text" placeholder="I want to see..." aria-label="Search articles" value={draft}
               onFocus={() => setShowSources(true)} onClick={() => { if (!draft.trim()) setShowSources(true); }}

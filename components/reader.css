@@ -69,6 +69,16 @@
   transition: background-color .5s;
 }
 
+.reader-back-to-top {
+  display: none;
+  width: 100%;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: .75px;
+  text-underline-offset: 4px;
+  cursor: pointer;
+}
+
 .reader-card h2 {
   margin: 0 0 8px;
   color: rgba(0, 0, 0, 0.5);
@@ -195,4 +205,5 @@
 
 @media (max-width: 656px) {
   .reader-about-text { padding-right: 0; }
+  .reader-back-to-top { display: block; }
 }

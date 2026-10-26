@@ -16,8 +16,10 @@ export default function ArchiveTransition({ children }: { children: React.ReactN
   const reset = useCallback(() => { destination.current = null; setPhase("idle"); }, []);
   const navigate = useCallback((href: string) => {
     if (destination.current) return;
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) { router.push(href); return; }
+    // Reserve the entry during the click so WebKit won't skip a push delayed by animation or loading.
+    window.history.pushState(window.history.state, "", location.href);
     destination.current = href;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) { setPhase("waiting"); router.replace(href); return; }
     setPhase("leaving");
   }, [router]);
 
@@ -45,7 +47,7 @@ export default function ArchiveTransition({ children }: { children: React.ReactN
       if (leaving && destination.current) {
         element.style.opacity = "0";
         setPhase("waiting");
-        router.push(destination.current);
+        router.replace(destination.current);
       } else {
         if (!leaving) focusAfterEnter.current = true;
         reset();

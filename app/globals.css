@@ -3,7 +3,7 @@
 :root { --font-sans: 'SF Pro', -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
-html { overflow-x: clip; scrollbar-gutter: stable; }
+html { overflow-x: clip; scrollbar-gutter: stable; touch-action: pan-x pan-y; }
 body { background: #fff; color: #000; font-family: var(--font-sans); font-size: 14px; line-height: 1.25; -webkit-font-smoothing: antialiased; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { font: inherit; color: inherit; letter-spacing: inherit; }

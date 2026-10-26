@@ -131,6 +131,10 @@ export default function ArticleReader({ article, onRead }: { article: ArticleDet
           </section>
         </div>
       </div>
+      <button type="button" className="reader-back-to-top reader-card" onClick={() => {
+        document.querySelector<HTMLButtonElement>(".reading-collapse")?.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+      }}>Back to top</button>
       {galleryIndex !== null && <ImageGallery article={article} initialIndex={galleryIndex} onLocate={locateGalleryImage} onClose={closeGallery} />}
     </article>
   );

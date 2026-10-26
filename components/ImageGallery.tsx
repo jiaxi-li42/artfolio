@@ -57,10 +57,11 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
     document.documentElement.style.overflow = "hidden";
     document.documentElement.style.scrollbarGutter = "auto";
     element.showModal();
-    element.querySelector<HTMLButtonElement>(".gallery-close")?.focus();
+    element.querySelector<HTMLButtonElement>(".gallery-close")?.focus({ preventScroll: true });
     const resize = () => {
       setViewport({ width: window.innerWidth, height: window.innerHeight });
       setTouch(matchMedia("(pointer: coarse)").matches);
+      swiper.current?.updateSize();
     };
     const pointer = matchMedia("(pointer: coarse)");
     window.addEventListener("resize", resize);
@@ -78,6 +79,9 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
       document.documentElement.style.scrollbarGutter = previousGutter.current;
     };
   }, []);
+
+  // Reposition slides after the new layout, while height-only toolbar changes keep their transition.
+  useLayoutEffect(() => { swiper.current?.update(); }, [viewport.width, touch]);
 
   function close() {
     if (closing.current) return;
@@ -110,6 +114,7 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
     <div className="gallery-inner" ref={inner}>
       <div className="gallery-top"><button className="gallery-close" type="button" aria-label="Close image gallery" onClick={close} onTouchEnd={event => { event.preventDefault(); close(); }}><MaterialIcon name="close" /></button></div>
       <Swiper key={touch ? "touch" : "mouse"} className="gallery-stage" modules={[EffectFade, Keyboard, Navigation, Pagination, Virtual]} initialSlide={index} slidesPerView={1} speed={matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 300}
+        updateOnWindowResize={false} resizeObserver={false}
         effect={touch ? "slide" : "fade"} fadeEffect={{ crossFade: true }} virtual={touch} loop={false}
         threshold={5} touchRatio={1} touchAngle={45} followFinger longSwipes longSwipesMs={300} longSwipesRatio={.5} shortSwipes resistance resistanceRatio={.85} simulateTouch={touch}
         keyboard={{ enabled: true, onlyInViewport: true, pageUpDown: true }}
