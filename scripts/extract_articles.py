@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode, qu
 
 from bs4 import BeautifulSoup
 from PIL import Image
-from source_metadata import extract_metadata, extract_reading_body
+from source_metadata import article_content, extract_metadata, extract_reading_body
 from content_store import ContentIssue, RetryableFetchError, atomic_write, save
 from content_validation import published_date
 
@@ -343,11 +343,7 @@ def extract(name):
     authors = metadata["authors"]
     credits = [{"scope": "article", **credit} for credit in metadata["credits"]]
     images = []
-    selectors = {
-        "teeth": ".article__right__body", "aperture": ".post-content-column", "itsnicethat": "article",
-        "c41": ".post-content", "phroom": '[data-elementor-type="wp-post"]',
-    }
-    body = soup.select_one(selectors[name])
+    body = article_content(name, soup)
     if body is None:
         raise ContentIssue("Article body selector no longer matches")
     title = text(soup.select_one("h1")) or selected["title"]
@@ -356,9 +352,6 @@ def extract(name):
     elif name == "aperture":
         image_nodes = soup.select(".banner-editorial img") + body.find_all("img")
     elif name == "itsnicethat":
-        body = BeautifulSoup(str(body), "html.parser")
-        for e in body.select(".module-cluster,.module-newsletter,.extra-detail,.fullscreen-article-header"):
-            e.decompose()
         image_nodes = soup.select(".fullscreen-article-header img") + body.find_all("img")
     elif name == "c41":
         image_nodes = soup.select(".post-thumbnail img") + body.find_all("img")
@@ -381,16 +374,11 @@ def extract(name):
                 r[key] = previous[key]
         if r["caption"] or r.get("credit"):
             credits.append({"scope": "image", "position": r["position"], "text": " ".join(filter(None, [r["caption"], r.get("credit")]))})
-    clean = BeautifulSoup(str(body), "html.parser")
-    for e in clean.select("script,style,noscript"):
-        e.decompose()
-    paragraphs = [text(e) for e in clean.select("p,h1,h2,h3,h4,li,figcaption")
-                  if text(e) and not e.select("p,h1,h2,h3,h4,li,figcaption")]
+    paragraphs = extract_reading_body(name, soup, metadata, {r['caption'] for r in images if r.get('caption')})
     body_text = "\n\n".join(paragraphs)
-    cleaned = extract_reading_body(name, soup, metadata, {r['caption'] for r in images if r.get('caption')})
     if not title.strip() or not images or len(images) > 100:
         raise ContentIssue('Missing title/images or unexpected gallery size')
-    if name in {'aperture', 'itsnicethat', 'c41'} and sum(map(len, cleaned)) < 80:
+    if name in {'aperture', 'itsnicethat', 'c41'} and sum(map(len, paragraphs)) < 80:
         raise ContentIssue('Expected editorial body is missing or unexpectedly short')
     if re.search(r'^(?:just a moment|access denied|verify you are human|sign in to continue)$', title, re.I):
         raise ContentIssue('Challenge or login page returned instead of article')
@@ -404,7 +392,7 @@ def extract(name):
         taxonomies.extend({**r, "kind": "category"} for r in content_links(soup.select_one(".single-post-date"), url))
     elif name == "itsnicethat":
         taxonomies.extend({"label": text(e), "url": urljoin(url,e.find_parent("a")["href"]), "kind": "source label"}
-                          for e in soup.select(".fullscreen-article-header .tag") if e.find_parent("a"))
+                          for e in soup.select(".fullscreen-article-header .tag") + body.select(".tag") if e.find_parent("a"))
     elif name == "c41":
         taxonomies.extend({"label": text(e), "kind": "category", "url": None} for e in soup.select(".post-cat") if text(e))
     subtitle = metadata["subtitle"]
@@ -425,7 +413,7 @@ def extract(name):
             "feed_creator_raw": selected.get("creator") or selected.get("feed_author"),
             "missing_fields": [k for k,v in [("authors",authors),("credits",credits)] if not v],
             "captured_at": datetime.now(timezone.utc).isoformat()}
-    data['quality'] = {'type': 'editorial' if cleaned else 'gallery', 'cleaned_paragraphs': len(cleaned)}
+    data['quality'] = {'type': 'editorial' if paragraphs else 'gallery', 'cleaned_paragraphs': len(paragraphs)}
     save(folder / 'article.json', data)
     atomic_write(folder / 'body.txt', body_text.encode('utf-8'))
     return {"site": name, "title": title, "authors": authors, "images": len(images), "credits": len(credits), "text_characters": len(body_text), "missing_fields": data["missing_fields"]}

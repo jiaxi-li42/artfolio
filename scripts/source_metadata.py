@@ -43,7 +43,7 @@ def extract_subtitle(site, soup):
         node = header.select_one(".subtitle, .fl-module-rich-text .fl-rich-text") if header else None
         return text(node) or None
     if site == "itsnicethat":
-        node = soup.select_one(".fullscreen-article-header .rich-text")
+        node = soup.select_one(".fullscreen-article-header .rich-text, article h1 + .h2 .rich-text")
         return text(node) or None
     return None
 
@@ -68,13 +68,28 @@ def reference_sections(node, url):
     return result
 
 
-def extract_reading_body(site, soup, metadata, captions=()):
+def article_content(site, soup):
+    """Clone the article region without source-specific promotional modules."""
     selectors = {"teeth": ".article__right__body", "aperture": ".post-content-column", "itsnicethat": "article",
                  "c41": ".post-content", "phroom": '[data-elementor-type="wp-post"]'}
     source = soup.select_one(selectors[site])
     if source is None:
-        raise ValueError("Source body structure changed")
+        return None
     body = BeautifulSoup(str(source), "html.parser")
+    excluded = {
+        "aperture": ".gray-product-block,.wp-block-acf-gray-product-block",
+        "itsnicethat": "aside,.module-cluster,.module-newsletter,.extra-detail,.fullscreen-article-header",
+    }.get(site)
+    if excluded:
+        for node in body.select(excluded):
+            node.decompose()
+    return body
+
+
+def extract_reading_body(site, soup, metadata, captions=()):
+    body = article_content(site, soup)
+    if body is None:
+        raise ValueError("Source body structure changed")
     if site == "phroom":
         for index, node in enumerate(body.select(".elementor-widget-text-editor")):
             if index in metadata["body_exclusion_indexes"]:
@@ -84,13 +99,15 @@ def extract_reading_body(site, soup, metadata, captions=()):
                 node.decompose()
         for node in body.select(".elementor-heading-title"):
             node.decompose()
-    if site == "itsnicethat":
-        for heading in body.select("h3"):
-            if text(heading) == "Share Article" and heading.parent.select_one(".social-share"):
-                heading.parent.decompose()
     for node in body.select("script,style,noscript,figcaption,.wp-caption-text,.gallery-caption,.post-credits,.margin-credits,.article_author_bio,.module-cluster,.module-newsletter,.extra-detail,.fullscreen-article-header"):
         node.decompose()
-    return [text(node) for node in body.select("p,h1,h2,h3,h4,li") if text(node) and not node.select("p,h1,h2,h3,h4,li")]
+    selector = "p,h1,h2,h3,h4,li"
+    if site == "itsnicethat":
+        if body.select_one(".module-text") is None:
+            raise ValueError("Source editorial text modules no longer match")
+        # Only editorial modules; headers, taxonomy, recommendations and image captions are separate.
+        selector = ":is(.module-text,.module-quote) :is(p,h1,h2,h3,h4,li)"
+    return [text(node) for node in body.select(selector) if text(node) and not node.select("p,h1,h2,h3,h4,li")]
 
 
 def extract_metadata(site, soup, url):
