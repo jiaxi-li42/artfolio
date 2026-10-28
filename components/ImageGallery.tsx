@@ -19,11 +19,23 @@ const galleryEase = CustomEase.create("gallery-css-ease", "M0,0 C0.25,0.1 0.25,1
 
 function GalleryImage({ image, index, active, viewport }: { image: ImageRecord; index: number; active: boolean; viewport: { width: number; height: number } }) {
   const caption = useRef<HTMLElement>(null);
+  const captionScroll = useRef<HTMLDivElement>(null);
   const [captionHeight, setCaptionHeight] = useState(0);
+  const [scrollEdges, setScrollEdges] = useState({ top: false, bottom: false });
+  function updateCaptionEdges() {
+    const element = captionScroll.current;
+    if (!element) return;
+    const top = element.scrollTop > 1;
+    const bottom = element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+    setScrollEdges(previous => previous.top === top && previous.bottom === bottom ? previous : { top, bottom });
+  }
   useLayoutEffect(() => {
     const element = caption.current;
     if (!element) return;
-    const measure = () => setCaptionHeight(Math.ceil(element.getBoundingClientRect().height));
+    const measure = () => {
+      setCaptionHeight(Math.ceil(element.getBoundingClientRect().height));
+      updateCaptionEdges();
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
@@ -32,7 +44,9 @@ function GalleryImage({ image, index, active, viewport }: { image: ImageRecord; 
   const width = Math.max(1, Math.min(viewport.width - 16, (viewport.height - 112 - captionHeight - (image.caption.trim() ? 8 : 0)) * image.width / image.height));
   return <figure className="gallery-figure" data-index={index} data-image-id={image.id} style={{ width }}>
     <ArticleImage image={image} first={active} fullSize sizes={`${Math.ceil(width)}px`} />
-    {image.caption.trim() && <figcaption ref={caption} tabIndex={active ? 0 : -1} className="reader-caption gallery-caption swiper-no-swiping">{image.caption}</figcaption>}
+    {image.caption.trim() && <figcaption ref={caption} className="reader-caption gallery-caption swiper-no-swiping" data-scroll-top={scrollEdges.top} data-scroll-bottom={scrollEdges.bottom}>
+      <div ref={captionScroll} tabIndex={active ? 0 : -1} className="gallery-caption-scroll" onScroll={updateCaptionEdges}>{image.caption}</div>
+    </figcaption>}
   </figure>;
 }
 
@@ -100,7 +114,7 @@ export default function ImageGallery({ article, initialIndex, onLocate, onClose 
       .call(() => onClose(currentIndex.current));
   }
 
-  return <dialog ref={dialog} className="image-gallery" data-touch={touch} data-phase={phase} aria-labelledby="gallery-title" onCancel={event => { event.preventDefault(); close(); }} onKeyDown={event => {
+  return <dialog ref={dialog} className="image-gallery" data-touch={touch} data-phase={phase} aria-labelledby="gallery-title" onCancel={event => { event.preventDefault(); close(); }} onKeyDownCapture={event => {
     if (event.target instanceof Element && event.target.closest(".gallery-caption") && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) { event.stopPropagation(); return; }
     if (event.key !== "Tab") return;
     const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]')].filter(element => !element.closest("[inert]") && element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
