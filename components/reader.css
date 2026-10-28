@@ -104,8 +104,6 @@
   gap: 8px;
 }
 
-.reader-metadata:only-child { grid-column: 1 / -1; }
-
 .reader-credits dl,
 .reader-credits dd {
   margin: 0;

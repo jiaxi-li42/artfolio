@@ -105,12 +105,10 @@ export default function ArticleReader({ article, onRead }: { article: ArticleDet
         {article.images.slice(1).map((image, index) => <ImageFigure key={image.id} image={image} onOpen={() => openGallery(index + 1)} />)}
       </div>}
       <div className="reader-footer">
-        <section className="reader-about reader-card" aria-labelledby="reader-about-heading">
+        {article.bodyParagraphs.length > 0 && <section className="reader-about reader-card" aria-labelledby="reader-about-heading">
           <h2 id="reader-about-heading">About</h2>
-          <div className="reader-about-text">{article.bodyParagraphs.length
-            ? article.bodyParagraphs.map((paragraph, index) => <p key={index}>{paragraph}</p>)
-            : <p>No content found.</p>}</div>
-        </section>
+          <div className="reader-about-text">{article.bodyParagraphs.map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div>
+        </section>}
         <div className="reader-metadata">
           <section className="reader-credits reader-card" aria-labelledby="reader-credits-heading">
           <h2 id="reader-credits-heading">Credits</h2>
