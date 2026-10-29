@@ -38,8 +38,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid #171717; outline-offs
 .card-image { width: 65px; height: 65px; flex: 0 0 65px; overflow: hidden; border-radius: 10px; position: relative; background: rgba(0, 0, 0, .04); }
 .card-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .card-copy { min-width: 0; position: relative; }
-.card-source { display: block; font-size: 14px; line-height: 17.5px; }
-.card-title { display: block; font-size: 14px; line-height: 17.5px; color: rgba(0, 0, 0, .5); }
+.card-source { display: block; font-size: 14px; line-height: 17.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: 14px; line-height: 17.5px; color: rgba(0, 0, 0, .5); }
 /* The final ScrollTrigger needs half a card of travel beyond the last row. */
 .directory-sentinel { height: calc(var(--card-height) / 2); }
 .reading-area { flex: 1 1 auto; min-width: 0; padding: 8px; }
@@ -50,8 +50,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid #171717; outline-offs
 .mobile-empty { display: none; }
 .reading-card { display: none; }
 .reading-card .card-copy { flex: 1; }
-.reading-card .card-source { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.reading-card .card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 @media (max-width: 768px) {
   body { font-size: 13.5px; letter-spacing: -.31px; }
   .article-nav { --card-height: 80px; }
