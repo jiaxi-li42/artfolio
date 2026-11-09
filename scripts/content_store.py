@@ -15,6 +15,10 @@ class ContentIssue(ValueError):
     """Content cannot be published safely with the current source adapter."""
 
 
+class SkipArticle(ContentIssue):
+    """A recognized article type is intentionally excluded from collection."""
+
+
 class RetryableFetchError(OSError):
     def __init__(self, message, retry_after=0):
         super().__init__(message)

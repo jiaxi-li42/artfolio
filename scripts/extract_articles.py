@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode, qu
 from bs4 import BeautifulSoup
 from PIL import Image
 from source_metadata import article_content, extract_metadata, extract_reading_body
-from content_store import ContentIssue, RetryableFetchError, atomic_write, save
+from content_store import ContentIssue, RetryableFetchError, SkipArticle, atomic_write, save
 from content_validation import published_date
 
 OUT = Path(__file__).resolve().parent.parent / "data" / "sources"
@@ -183,7 +183,7 @@ def public_read(url, limit=5_000_000, headers=None):
     return raw, meta
 
 
-def feed_items(raw, issues=None):
+def feed_items(raw, issues=None, allow_empty=False):
     try:
         root = ET.fromstring(raw.decode("utf-8-sig").lstrip())
     except (ET.ParseError, UnicodeError) as error:
@@ -232,6 +232,9 @@ def feed_items(raw, issues=None):
     elif invalid:
         print(f'::warning::RSS: {len(invalid)} malformed entries isolated', flush=True)
     if not result:
+        kind = root.tag.split('}')[-1]
+        if allow_empty and not invalid and (kind == 'feed' or kind == 'rss' and root.find('channel') is not None):
+            return []
         raise ContentIssue(f'Feed contains no valid article entries; {len(invalid)} entries need review')
     return sorted(result, key=lambda x: x["sort_at"], reverse=True)
 
@@ -333,12 +336,29 @@ def image_record(im, scope, soup, base):
             "scope": scope, "identity": image_key(url)}
 
 
+def is_video_article(name, soup):
+    if soup.select_one('meta[property="og:type"][content^="video"], body.single-format-video'):
+        return True
+    if name == 'c41':
+        return soup.select_one('article .post-header .post-thumbnail-video, article .post-header .featured-video-plus') is not None
+    if name == 'itsnicethat':
+        props = soup.select_one('script#props[type="application/json"]')
+        try:
+            page = json.loads(props.get_text()).get('data', {}).get('page', {}) if props else {}
+        except (ValueError, AttributeError, TypeError):
+            page = {}
+        return isinstance(page, dict) and bool(page.get('heroVideo') or page.get('heroVideoEmbed'))
+    return False
+
+
 def extract(name):
     folder = OUT / name
     soup = BeautifulSoup((folder / "article.html").read_text(encoding="utf-8"), "html.parser")
     selected = json.loads((folder / "selected-feed-item.json").read_text(encoding="utf-8"))
     saved = json.loads((folder / "article.json").read_text(encoding="utf-8")) if (folder / "article.json").exists() else {}
     url = selected["url"]
+    if is_video_article(name, soup):
+        raise SkipArticle('Video-led article excluded by collection policy')
     metadata = extract_metadata(name, soup, url)
     authors = metadata["authors"]
     credits = [{"scope": "article", **credit} for credit in metadata["credits"]]
@@ -383,11 +403,8 @@ def extract(name):
     if re.search(r'^(?:just a moment|access denied|verify you are human|sign in to continue)$', title, re.I):
         raise ContentIssue('Challenge or login page returned instead of article')
     meta = {e.get("property") or e.get("name"): e.get("content") for e in soup.find_all("meta")}
-    taxonomies = []
-    for item in feed_items((folder / "feed-0.xml").read_bytes()):
-        if item["url"] == url:
-            taxonomies.extend({"label": value, "kind": "unclassified feed term", "url": None} for value in item.get("terms", []) if value)
-            break
+    taxonomies = [{"label": value, "kind": "unclassified feed term", "url": None}
+                  for value in selected.get("terms", []) if value]
     if name == "aperture":
         taxonomies.extend({**r, "kind": "category"} for r in content_links(soup.select_one(".single-post-date"), url))
     elif name == "itsnicethat":

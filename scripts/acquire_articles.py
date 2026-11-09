@@ -3,7 +3,9 @@ import hashlib
 import importlib.util
 import json
 import time
+import urllib.error
 from pathlib import Path
+from urllib.parse import urljoin
 
 import extract_articles as parser
 from content_store import ContentIssue, RetryableFetchError, atomic_write, now, save
@@ -15,7 +17,8 @@ OUT = ROOT / 'data' / 'acquisition'
 
 def adapter_version():
     return hashlib.sha256(b''.join((ROOT / 'scripts' / name).read_bytes() for name in
-        ['extract_articles.py', 'source_metadata.py', 'acquire_articles.py', 'prepare_data.py', 'content_validation.py'])).hexdigest()[:16]
+        ['extract_articles.py', 'source_metadata.py', 'acquire_articles.py', 'prepare_data.py', 'content_validation.py',
+         'run_daily.py', 'content_store.py'])).hexdigest()[:16]
 
 
 def stable_id(source, url):
@@ -89,6 +92,62 @@ def feeds(source):
     return items, receipt
 
 
+def history(source, page):
+    feed = parser.FEEDS[source][0]
+    if type(page) is not int or page < (1 if source == 'itsnicethat' else 2):
+        raise ContentIssue('Invalid historical page number')
+    url = ('https://www.itsnicethat.com/articles' + (f'?page={page}' if page > 1 else '') if source == 'itsnicethat'
+           else feed + ('&' if '?' in feed else '?') + f'paged={page}')
+    try:
+        raw, response = parser.public_read(url)
+    except urllib.error.HTTPError as error:
+        if error.code != 404 or source == 'itsnicethat':
+            raise
+        receipt = {'url': url, 'page': page, 'checked_at': now(), 'items': 0, 'has_next': False, 'response': {'status': 404}}
+        save(OUT / 'feeds' / source / 'history-receipt.json', receipt)
+        return [], receipt
+    if source == 'itsnicethat':
+        soup = parser.BeautifulSoup(raw, 'html.parser')
+        try:
+            props = soup.select_one('script#props[type="application/json"]')
+            listing = json.loads(props.get_text())['data']['page']['items']
+            edges, info = listing['edges'], listing['pageInfo']
+            if not isinstance(edges, list) or len(edges) > 100:
+                raise ValueError('Invalid article listing')
+            if type(info['page']) is not int or info['page'] != page or type(info['hasNextPage']) is not bool:
+                raise ValueError('Unexpected historical page metadata')
+            has_next = info['hasNextPage']
+            if not edges and has_next:
+                raise ValueError('Empty article listing claims another page')
+            items = []
+            for edge in edges:
+                node = edge['node']
+                if node['__typename'] != 'Article':
+                    raise ValueError('Unexpected listing item type')
+                stamp = published_date(node.get('publicationDate'))
+                require_text(stamp, 'listing publication date')
+                require_text(node.get('title'), 'listing title')
+                require_text(node.get('url'), 'listing URL')
+                target = urljoin(url, node['url'])
+                require_url(target, 'listing URL', https=True)
+                tags = node.get('tags', [])
+                if not isinstance(tags, list):
+                    raise ValueError('Invalid listing tags')
+                items.append({'title': node['title'], 'url': parser.canonical(target), 'published_at': stamp,
+                    'terms': [tag['title'] for tag in tags if isinstance(tag, dict) and isinstance(tag.get('title'), str)]})
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise ContentIssue('Historical article listing structure no longer matches') from error
+    else:
+        items = parser.feed_items(raw, allow_empty=True)
+        has_next = bool(items)
+    folder = OUT / 'feeds' / source
+    atomic_write(folder / ('history.html' if source == 'itsnicethat' else 'history.xml'), raw)
+    receipt = {'url': url, 'page': page, 'checked_at': now(), 'items': len(items), 'has_next': has_next,
+        'response': response, 'sha256': hashlib.sha256(raw).hexdigest()}
+    save(folder / 'history-receipt.json', receipt)
+    return items, receipt
+
+
 def acquire(source, item, force=False):
     article_id = stable_id(source, item['url'])
     candidate = OUT / 'articles' / article_id
@@ -109,7 +168,9 @@ def acquire(source, item, force=False):
             'sha256': hashlib.sha256(raw).hexdigest()}
         save(receipt_path, receipt)
     save(folder / 'selected-feed-item.json', item)
-    atomic_write(folder / 'feed-0.xml', (OUT / 'feeds' / source / 'feed-0.xml').read_bytes())
+    feed = OUT / 'feeds' / source / 'feed-0.xml'
+    if feed.is_file():
+        atomic_write(folder / 'feed-0.xml', feed.read_bytes())
     spec = importlib.util.spec_from_file_location('article_parser_' + article_id.replace('-', '_'), Path(parser.__file__))
     worker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(worker)

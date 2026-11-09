@@ -14,10 +14,12 @@ from zoneinfo import ZoneInfo
 
 import acquire_articles as acquisition
 import extract_articles as parser
-from content_store import ContentIssue, Lease, LeaseBusy, RetryableFetchError, S3Store, atomic_write, json_bytes, now, save
+from content_store import ContentIssue, Lease, LeaseBusy, RetryableFetchError, S3Store, SkipArticle, atomic_write, json_bytes, now, save
+from content_validation import require_text, require_url
 from prepare_data import ORDER, assign_slugs, build_article
 
 VERSION = re.compile(r'[a-f0-9]{64}')
+HISTORY_PAGE_LIMIT = 10
 
 
 def snapshot(store, folder, namespace):
@@ -121,6 +123,20 @@ def failure(job, error, version):
     job['next_retry'] = time.time() + max(min(21600, 1800 * 2 ** min(job['attempts'], 5)), getattr(error, 'retry_after', 0))
 
 
+def candidate_id(source, item):
+    if not isinstance(item, dict):
+        raise ContentIssue('Invalid candidate record')
+    require_text(item.get('title'), 'candidate title')
+    require_url(item.get('url'), 'candidate URL', https=True)
+    try:
+        stamp = datetime.fromisoformat(item['published_at'])
+        if stamp.tzinfo is None:
+            raise ValueError('Missing candidate timezone')
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ContentIssue('Invalid candidate publication timestamp') from error
+    return acquisition.stable_id(source, item['url'])
+
+
 class Runner:
     def __init__(self, store, lease, run_id):
         self.store, self.lease, self.run_id = store, lease, run_id
@@ -134,15 +150,110 @@ class Runner:
         if missing_state and self.catalog['articles']:
             raise ContentIssue('A public release exists but private state is missing; restore a state backup')
         for key, job in self.state['jobs'].items():
-            if job.get('source') not in ORDER or key != f"{job.get('date')}/{job.get('source')}" or job.get('status') not in {'pending', 'retry', 'no_new', 'ready', 'published', 'quarantined', 'held'}:
+            if job.get('source') not in ORDER or key != f"{job.get('date')}/{job.get('source')}" or job.get('status') not in {'pending', 'retry', 'no_new', 'ready', 'published', 'quarantined', 'held'} or type(job.get('backfill', False)) is not bool:
                 raise ContentIssue('Invalid source/date job in state')
             date.fromisoformat(job['date'])
         published = {a['id'] for a in self.catalog['articles']}
         for job in self.state['jobs'].values():
             if job.get('id') in published:
                 job.update(status='published')
+        pools = self.state.setdefault('candidates', {})
+        skipped = self.state.setdefault('skipped_videos', {})
+        if not isinstance(pools, dict) or set(pools) - set(ORDER) or not isinstance(skipped, dict):
+            raise ContentIssue('Invalid candidate pool state')
+        for source, pool in pools.items():
+            if not isinstance(pool, dict):
+                raise ContentIssue('Invalid source candidate pool')
+            for identity, item in pool.items():
+                if candidate_id(source, item) != identity:
+                    raise ContentIssue('Candidate identity mismatch')
+        for identity, item in skipped.items():
+            if not isinstance(item, dict) or item.get('source') not in ORDER or candidate_id(item['source'], item) != identity:
+                raise ContentIssue('Invalid skipped video record')
+        for job in self.state['jobs'].values():
+            if job.get('selected_item'):
+                self.remember_candidates(job['source'], [job['selected_item']])
+        history = self.state.setdefault('history', {})
+        if not isinstance(history, dict) or set(history) - set(ORDER):
+            raise ContentIssue('Invalid historical pagination state')
+        for source, cursor in history.items():
+            if (not isinstance(cursor, dict) or type(cursor.get('next_page')) is not int or
+                    cursor['next_page'] < (1 if source == 'itsnicethat' else 2) or
+                    type(cursor.get('exhausted')) is not bool):
+                raise ContentIssue('Invalid historical pagination cursor')
         self.sequence = 0
         self.changed = False
+        self.skipped_this_run = []
+        self.discovery_issues = {}
+        self.history_pages_read = {}
+        self.history_seen_pages = {}
+        self.history_errors = {}
+
+    def remember_candidates(self, source, items):
+        pool = self.state['candidates'].setdefault(source, {})
+        used = {a['id'] for a in self.catalog['articles']} | set(self.state['skipped_videos'])
+        for identity in list(pool):
+            if identity in used:
+                del pool[identity]
+        for item in items:
+            identity = candidate_id(source, item)
+            if identity not in used:
+                pool.setdefault(identity, item)
+
+    def candidates_for(self, job):
+        used = {a['id'] for a in self.catalog['articles']} | set(self.state['skipped_videos'])
+        used.update(row.get('id') for row in self.state['jobs'].values() if row is not job)
+        items = self.state['candidates'].get(job['source'], {})
+        candidates = [item for identity, item in items.items() if identity not in used and
+            datetime.fromisoformat(item['published_at']).astimezone(ZoneInfo('Europe/London')).date().isoformat() <= job['date']]
+        candidates.sort(key=lambda item: datetime.fromisoformat(item['published_at']).timestamp(), reverse=True)
+        selected = job.get('selected_item')
+        if selected:
+            candidates.sort(key=lambda item: item['url'] != selected['url'])
+        return candidates
+
+    def discover_history(self, source):
+        cursor = self.state['history'].setdefault(source, {
+            'next_page': 1 if source == 'itsnicethat' else 2, 'exhausted': False})
+        if cursor['exhausted']:
+            return False
+        if source in self.history_errors:
+            raise self.history_errors[source]
+        if self.history_pages_read.get(source, 0) >= HISTORY_PAGE_LIMIT:
+            raise RetryableFetchError('Historical page budget reached; resume on the next run')
+        parser.check_deadline()
+        page = cursor['next_page']
+        self.history_pages_read[source] = self.history_pages_read.get(source, 0) + 1
+        try:
+            items, receipt = acquisition.history(source, page)
+            identities = sorted({candidate_id(source, item) for item in items})
+            digest = hashlib.sha256(json_bytes(identities)).hexdigest()
+            seen_pages = self.history_seen_pages.setdefault(source, set())
+            if identities and digest in seen_pages:
+                raise ContentIssue('Historical pagination repeated an already read page')
+            self.remember_candidates(source, items)
+        except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
+            self.discovery_issues[source] = f'Historical page {page}: {error}'[:1500]
+            self.history_errors[source] = error
+            raise
+        self.state['feeds'][source] = snapshot(self.store, acquisition.OUT / 'feeds' / source, 'feeds/' + source)
+        cursor.update(next_page=page + 1, exhausted=not receipt['has_next'], checked_at=now())
+        if identities:
+            seen_pages.add(digest)
+        self.checkpoint()
+        print(json.dumps({'source': source, 'history_page': page, 'items': len(items), 'exhausted': cursor['exhausted']}), flush=True)
+        return bool(items)
+
+    def article_candidates(self, job, backfill):
+        attempted = set()
+        while True:
+            for item in self.candidates_for(job):
+                identity = candidate_id(job['source'], item)
+                if identity not in attempted:
+                    attempted.add(identity)
+                    yield item
+            if not backfill or not self.discover_history(job['source']):
+                return
 
     def checkpoint(self):
         self.lease.renew()
@@ -153,14 +264,49 @@ class Runner:
 
     def collect(self, through, retry=False):
         plan_jobs(self.state, through)
+        if retry:
+            for job in self.state['jobs'].values():
+                if job['date'] <= through.isoformat() and job['status'] not in {'published', 'ready'}:
+                    job['backfill'] = True
+                    if job['status'] == 'no_new':
+                        job['status'] = 'pending'
         self.checkpoint()
         version = acquisition.adapter_version()
         today = datetime.now(ZoneInfo('Europe/London')).date().isoformat()
-        feed_cache, feed_errors, source_seconds = {}, {}, {}
+        feed_errors, source_seconds = {}, {}
         run_deadline = parser.DEADLINE
         feed_issues = self.state.setdefault('feed_issues', {})
+        # Discover on every run, including sources whose daily article is already published.
+        for source in ORDER:
+            if time.monotonic() >= run_deadline:
+                self.discovery_issues[source] = 'Feed refresh deferred: run time budget reached'
+                continue
+            started = time.monotonic()
+            parser.DEADLINE = min(run_deadline, started + 360)
+            try:
+                if self.state['feeds'].get(source):
+                    folder = acquisition.OUT / 'feeds' / source
+                    restore(self.store, self.state['feeds'][source], folder)
+                    self.remember_candidates(source, parser.feed_items((folder / 'feed-0.xml').read_bytes(), []))
+                items, receipt = acquisition.feeds(source)
+                self.remember_candidates(source, items)
+                self.state['feeds'][source] = snapshot(self.store, acquisition.OUT / 'feeds' / source, 'feeds/' + source)
+                if receipt.get('invalid_count'):
+                    feed_issues[source] = {'count': receipt['invalid_count'], 'checked_at': receipt.get('checked_at')}
+                    print(f"::warning::{source}: {receipt['invalid_count']} malformed RSS entries isolated", flush=True)
+                else:
+                    feed_issues.pop(source, None)
+            except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
+                feed_errors[source] = error
+                self.discovery_issues[source] = str(error)[:1500]
+                print(f'::warning::{source}: candidate discovery failed', flush=True)
+            finally:
+                parser.DEADLINE = run_deadline
+                source_seconds[source] = time.monotonic() - started
+            self.checkpoint()
         for job in sorted(self.state['jobs'].values(), key=lambda row: (row['date'] != through.isoformat(), row['date'], ORDER.index(row['source']))):
-            if job['date'] > through.isoformat() or not due(job, today, version, retry):
+            available = job['status'] == 'no_new' and bool(self.candidates_for(job))
+            if job['date'] > through.isoformat() or not (due(job, today, version, retry) or available):
                 continue
             if time.monotonic() >= run_deadline:
                 break
@@ -171,24 +317,11 @@ class Runner:
             started = time.monotonic()
             parser.DEADLINE = min(run_deadline, started + remaining)
             try:
-                if source not in feed_cache and source not in feed_errors:
-                    try:
-                        if self.state['feeds'].get(source):
-                            restore(self.store, self.state['feeds'][source], acquisition.OUT / 'feeds' / source)
-                        feed_cache[source], receipt = acquisition.feeds(source)
-                        self.state['feeds'][source] = snapshot(self.store, acquisition.OUT / 'feeds' / source, 'feeds/' + source)
-                        if receipt.get('invalid_count'):
-                            feed_issues[source] = {'count': receipt['invalid_count'], 'checked_at': receipt.get('checked_at')}
-                            print(f"::warning::{source}: {receipt['invalid_count']} malformed RSS entries isolated", flush=True)
-                        else:
-                            feed_issues.pop(source, None)
-                    except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
-                        feed_errors[source] = error
-                if source in feed_errors:
+                if source in feed_errors and not self.candidates_for(job):
                     failure(job, feed_errors[source], version)
                 else:
                     try:
-                        self.collect_job(job, feed_cache[source], version, retry)
+                        self.collect_job(job, version, retry)
                     except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
                         failure(job, error, version)
             finally:
@@ -197,21 +330,14 @@ class Runner:
             self.checkpoint()
             print(json.dumps({'date': job['date'], 'source': source, 'status': job['status']}), flush=True)
 
-    def collect_job(self, job, items, version, retry):
+    def collect_job(self, job, version, retry):
         source = job['source']
-        used = {a['id'] for a in self.catalog['articles']} | {row.get('id') for row in self.state['jobs'].values() if row is not job}
-        candidates = [item for item in items if datetime.fromisoformat(item['published_at']).astimezone(ZoneInfo('Europe/London')).date().isoformat() <= job['date']
-            and acquisition.stable_id(source, item['url']) not in used]
-        if job.get('selected_item'):
-            candidates = [job['selected_item']] + [item for item in candidates if item['url'] != job['selected_item']['url']]
-        if not candidates:
-            job.update(status='no_new', checked_at=now(), next_retry=time.time() + 7200)
-            job.pop('error', None)
-            return
+        if retry:
+            job['backfill'] = True
         if job.get('archive'):
             restore(self.store, job['archive'], acquisition.OUT / 'articles' / job['id'] / source)
         rejected = []
-        for item in candidates[:6]:
+        for item in self.article_candidates(job, job.get('backfill', False)):
             article_id = acquisition.stable_id(source, item['url'])
             if job.get('id') != article_id:
                 job.pop('archive', None)
@@ -219,19 +345,39 @@ class Runner:
             folder = acquisition.OUT / 'articles' / article_id / source
             try:
                 _, folder, _ = acquisition.acquire(source, item, force=retry or job.get('adapter_version', version) != version)
+            except SkipArticle as error:
+                record = {**item, 'source': source, 'reason': str(error), 'checked_at': now()}
+                self.state['skipped_videos'][article_id] = record
+                self.state['candidates'][source].pop(article_id, None)
+                self.skipped_this_run.append({'id': article_id, 'url': item['url'], 'title': item['title'],
+                    'source': source, 'date': job['date'], 'reason': str(error)})
+                for key in ['id', 'selected_item', 'archive']:
+                    job.pop(key, None)
+                self.checkpoint()
+                continue
             except (ContentIssue, RetryableFetchError, urllib.error.HTTPError, ValueError) as error:
                 if folder.exists():
                     job['archive'] = snapshot(self.store, folder, article_id)
                 if not isinstance(error, ContentIssue):
                     raise
-                rejected.append({'id': article_id, 'error': str(error)[:1500], 'archive': job.get('archive')})
+                rejected.append({'id': article_id, 'url': item['url'], 'title': item['title'],
+                    'error': str(error)[:1500], 'archive': job.get('archive')})
                 job['rejected'] = rejected
+                if len(rejected) >= 6:
+                    break
                 continue
             job['archive'] = snapshot(self.store, folder, article_id)
             summary, fetched = build_article(article_id, source, job['date'], folder, acquisition.OUT / 'build' / article_id, self.store)
             job.update(status='ready', summary=summary, fetched_at=fetched, adapter_version=version, checked_at=now(), attempts=0)
             job.pop('error', None)
             job.pop('next_retry', None)
+            job.pop('backfill', None)
+            return
+        if not rejected:
+            job.update(status='no_new', checked_at=now(), next_retry=time.time() + 7200, adapter_version=version, attempts=0)
+            job.pop('error', None)
+            job.pop('rejected', None)
+            job.pop('backfill', None)
             return
         raise ContentIssue('No candidate passed source validation: ' + json.dumps(rejected))
 
@@ -259,6 +405,8 @@ class Runner:
         self.pointer_etag = self.store.put_json('current.json', pointer, public=True, expected=self.pointer_etag)
         self.pointer, self.catalog = pointer, catalog
         self.changed = True
+        for source in self.state['candidates']:
+            self.remember_candidates(source, [])
         for row in ready:
             row['status'] = 'published'
         self.checkpoint()
@@ -305,12 +453,18 @@ class Runner:
         bad = [row for row in jobs if row['status'] in {'retry', 'quarantined'}]
         waiting = [row for row in jobs if row['status'] in {'pending', 'ready'}]
         current_ok = any(row['date'] == self.state.get('last_requested_date') and row['status'] in {'published', 'no_new'} for row in jobs)
-        status = 'partial' if (bad or waiting) and current_ok else 'failed' if bad or waiting else 'success' if self.changed else 'no_new'
+        incomplete = bad or waiting or self.discovery_issues
+        status = 'partial' if incomplete and current_ok else 'failed' if incomplete else 'success' if self.changed else 'no_new'
         self.state['failed_runs'] = self.state.get('failed_runs', 0) + 1 if status in {'partial', 'failed'} else 0
         report = {'runId': self.run_id, 'finishedAt': now(), 'status': status, 'release': (self.pointer or {}).get('version'),
             'counts': {name: sum(row['status'] == name for row in jobs) for name in ['published', 'no_new', 'retry', 'quarantined', 'pending', 'ready', 'held']},
-            'issues': [{'date': row['date'], 'source': row['source'], 'status': row['status'], 'error': row.get('error', '')} for row in bad],
-            'feedIssues': self.state.get('feed_issues', {})}
+            'issues': [{'date': row['date'], 'source': row['source'], 'status': row['status'], 'error': row.get('error', ''),
+                'url': row.get('selected_item', {}).get('url'), 'title': row.get('selected_item', {}).get('title')} for row in bad],
+            'feedIssues': self.state.get('feed_issues', {}), 'discoveryIssues': self.discovery_issues,
+            'history': {source: {'nextPage': cursor['next_page'], 'exhausted': cursor['exhausted'],
+                'pagesRead': self.history_pages_read.get(source, 0)} for source, cursor in self.state['history'].items()},
+            'candidates': {source: len(pool) for source, pool in self.state['candidates'].items()},
+            'skippedVideos': self.skipped_this_run, 'skippedVideoCount': len(self.state['skipped_videos'])}
         self.store.put_json(f'runs/{self.run_id}/report.json', report, immutable=True)
         self.checkpoint()
         return report
